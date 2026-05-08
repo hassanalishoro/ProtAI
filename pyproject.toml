@@ -83,8 +83,9 @@ protai-eval     = "protai.training.eval:main"
 
 
 [project.urls]
-Homepage      = "https://github.com/t7morgen/misato-dataset"  # update when you fork to your own repo
-Issues        = "https://github.com/t7morgen/misato-dataset/issues"
+Homepage          = "https://github.com/LastPredator/ProtAI"
+Issues            = "https://github.com/LastPredator/ProtAI/issues"
+Repository        = "https://github.com/LastPredator/ProtAI"
 "Upstream MISATO" = "https://github.com/t7morgen/misato-dataset"
 
 

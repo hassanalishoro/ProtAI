@@ -45,7 +45,7 @@ ProtAI/
 ### Install
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/LastPredator/ProtAI.git
 cd ProtAI
 
 # Editable install with all optional extras (training + Flask backend + dev tools)
