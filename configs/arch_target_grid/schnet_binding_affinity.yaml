@@ -1,0 +1,15 @@
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  hidden_dim: 128
+  num_layers: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "mean"
+
+data:
+  frame_strategy: "frame_zero"
+
+train:
+  run_name: "ablation_arch_target_schnet_aff"
+  seed: 42

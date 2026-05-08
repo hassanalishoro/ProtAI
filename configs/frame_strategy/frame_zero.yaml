@@ -1,0 +1,15 @@
+# Baseline: use only the reference frame (frame 0) — what every PDBbind-trained
+# paper does, since they don't have trajectories. This is the apples-to-apples
+# row in the ablation table.
+
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  graph_pool: "mean"
+
+data:
+  frame_strategy: "frame_zero"
+
+train:
+  run_name: "ablation_frame_zero"
+  seed: 42

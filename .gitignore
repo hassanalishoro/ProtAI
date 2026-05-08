@@ -1,0 +1,70 @@
+# --- ProtAI generated artifacts (not committable) ---
+
+# Pre-sharded training data — 151 GB, regenerable via scripts/preshard.py
+data/processed/
+data/processed_tiny/
+
+# Training run outputs (checkpoints, tensorboard events, plots)
+runs/
+
+# The full MISATO MD dataset — 124 GB, downloaded from Zenodo
+data/MD/h5_files/MD.hdf5
+data/MD/h5_files/MD_8700.hdf5
+
+# --- Frontend revamp (kept local until model training is complete) ---
+# This way `git clone` on the cloud GPU pod stays small and fast — pod
+# doesn't need any frontend code to train. Remove these lines once training
+# is done and we're ready to publish the new site.
+frontend-new/
+frontend-new/dist/
+frontend-new/node_modules/
+frontend-new/.astro/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Misc ProtAI-specific ---
+FYP.zip
+*.tmp
+*.bak
+
+# --- Tensorboard / W&B logs (when not under runs/) ---
+wandb/
+tb_logs/
+mlruns/
+
+# --- Pytest / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/

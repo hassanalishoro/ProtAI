@@ -1,0 +1,16 @@
+# Attention pooling over multiple frames per complex.
+# (Stub config — actual attention-pool model wiring is a Tier-3 task on top
+# of the random-frame baseline; see protai.data.dataset for the data layout.)
+
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  graph_pool: "attention"
+
+data:
+  frame_strategy: "attention_pool"
+  n_frames: 8
+
+train:
+  run_name: "ablation_frame_attention_pool"
+  seed: 42

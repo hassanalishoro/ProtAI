@@ -1,0 +1,47 @@
+# Base config — all other configs inherit defaults from protai.config and
+# override what they need. This file is the canonical "sane defaults" anchor.
+
+data:
+  raw_h5: "data/MD/h5_files/MD.hdf5"
+  processed_dir: "data/processed"
+  splits_dir: "data/MD/splits"
+  train_split: "train_MD.txt"
+  val_split: "val_MD.txt"
+  test_split: "test_MD.txt"
+  edge_cutoff: 4.5
+  frame_strategy: "frame_zero"
+  n_frames: 8
+  keep_trajectory: true
+  strip_hydrogens: true
+  strip_solvent: true
+
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  hidden_dim: 128
+  num_layers: 4
+  gnn_md_attention_heads: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "mean"
+
+train:
+  batch_size: 16
+  num_workers: 4
+  max_epochs: 50
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  optimizer: "adamw"
+  grad_clip: 1.0
+  loss: "huber"
+  lr_schedule: "cosine"
+  warmup_epochs: 2
+  dropout: 0.1
+  seed: 42
+  precision: "bf16-mixed"
+  accelerator: "auto"
+  devices: "auto"
+  early_stop_patience: 8
+  early_stop_min_delta: 1.0e-4
+  log_dir: "runs"
+  run_name: null

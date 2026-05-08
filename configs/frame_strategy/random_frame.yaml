@@ -1,0 +1,15 @@
+# Random-frame sampling: each epoch the dataloader picks a random frame from
+# the 100-frame trajectory per complex. Acts as data augmentation, exposes
+# the model to pocket flexibility for free.
+
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  graph_pool: "mean"
+
+data:
+  frame_strategy: "random"
+
+train:
+  run_name: "ablation_frame_random"
+  seed: 42

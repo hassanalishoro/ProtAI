@@ -1,0 +1,27 @@
+# Headline configuration — the best-of-everything combination.
+# Run with 3 different seeds (override at CLI: `--override train.seed=1` etc.)
+# to get the error bars that go in the paper's main result.
+
+model:
+  name: "schnet"
+  target: "binding_affinity"
+  hidden_dim: 128
+  num_layers: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "attention"
+
+data:
+  frame_strategy: "random"
+  edge_cutoff: 4.5
+
+train:
+  run_name: "headline"
+  batch_size: 32
+  max_epochs: 80
+  learning_rate: 5.0e-4
+  weight_decay: 1.0e-5
+  loss: "huber"
+  precision: "bf16-mixed"
+  early_stop_patience: 12
+  seed: 42

@@ -1,0 +1,14 @@
+model:
+  name: "gnn_md"
+  target: "binding_affinity"
+  hidden_dim: 128
+  num_layers: 5
+  gnn_md_attention_heads: 4
+  graph_pool: "mean"
+
+data:
+  frame_strategy: "frame_zero"
+
+train:
+  run_name: "ablation_arch_target_gnn_md_aff"
+  seed: 42
