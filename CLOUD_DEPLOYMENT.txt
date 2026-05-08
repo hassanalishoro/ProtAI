@@ -155,9 +155,11 @@ MD.hdf5 fresh + presharding takes ~45-85 min total, $0.30-$0.70.
 
 # OPTION A (recommended): download MD.hdf5 from Zenodo
 #                          124 GB, ~30-60 min on a typical pod connection.
+# Record page (for citation / verification):
+#     https://zenodo.org/records/7711953
 mkdir -p data/MD/h5_files
 cd data/MD/h5_files
-wget https://zenodo.org/record/<MISATO-record>/files/MD.hdf5
+wget -c https://zenodo.org/records/7711953/files/MD.hdf5
 cd ../../..
 
 # OPTION B: rsync from another pod or a server with fast outbound only.
@@ -475,5 +477,10 @@ CHANGE LOG (update this file as we learn more)
             Data-access strategy clarified in step 4: re-preshard on
             cloud, do NOT upload your laptop preshard. Home upload
             speed is the bottleneck and the data is regenerable.
+
+2026-05-09  Pinned the actual Zenodo URL for MD.hdf5 in step 4
+            (https://zenodo.org/records/7711953/files/MD.hdf5).
+            Switched the example wget command to use -c so partial
+            downloads resume on retry instead of restarting from 0.
 
 [add entries here as we ship cloud runs]
