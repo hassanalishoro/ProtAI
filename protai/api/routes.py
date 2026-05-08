@@ -10,7 +10,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from .service import get_service
 
 
-def register_routes(app: Flask, frontend_dir: str = "../frontend") -> None:
+def register_routes(app: Flask, frontend_dir: str) -> None:
     """Attach all ProtAI HTTP routes to the given Flask app."""
 
     @app.route("/")
