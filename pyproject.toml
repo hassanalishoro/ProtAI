@@ -1,0 +1,123 @@
+# ProtAI — trajectory-aware protein-ligand binding affinity prediction
+#
+# After cloning the repo:
+#   py -3.11 -m pip install -e .          # core install (training + inference)
+#   py -3.11 -m pip install -e .[api]     # adds Flask backend deps
+#   py -3.11 -m pip install -e .[dev]     # adds pytest etc. for development
+#
+# Once installed, the CLI shortcuts work from anywhere:
+#   protai-preshard --h5 data/MD/h5_files/MD.hdf5 --out data/processed
+#   protai-train --config configs/headline.yaml
+#   protai-eval --ckpt runs/headline/best.ckpt --split data/MD/splits/test_MD.txt
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "protai"
+version = "0.1.0"
+description = "Trajectory-aware protein–ligand binding affinity prediction with graph neural networks on the MISATO dataset."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "LGPL-2.1-or-later" }
+authors = [
+    { name = "Ibaad Ahmed Chaudhry" },
+    { name = "Abdullah Kaif Sheikh" },
+    { name = "Hassan Ali Shoro" },
+]
+keywords = [
+    "protein-ligand", "binding-affinity", "graph-neural-networks",
+    "molecular-dynamics", "drug-discovery", "schnet", "misato",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core runtime — needed for training + inference
+dependencies = [
+    "torch>=2.0",
+    "torch-geometric>=2.5",
+    "pytorch-lightning>=2.0",
+    "h5py>=3.9",
+    "numpy>=1.24,<2.0",        # numpy 2 still has compat issues with some scientific stack
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+
+# Flask backend dependencies (for serving the model + frontend)
+api = [
+    "flask>=2.3",
+    "flask-cors>=4.0",
+]
+
+# Development tools
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+# Plotting (used by some training-result analyses, optional)
+plot = [
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+]
+
+
+# Console-script shortcuts. After `pip install -e .` these work from any directory.
+[project.scripts]
+protai-preshard = "protai.data.preshard:_cli"
+protai-train    = "protai.training.train:main"
+protai-eval     = "protai.training.eval:main"
+
+
+[project.urls]
+Homepage      = "https://github.com/t7morgen/misato-dataset"  # update when you fork to your own repo
+Issues        = "https://github.com/t7morgen/misato-dataset/issues"
+"Upstream MISATO" = "https://github.com/t7morgen/misato-dataset"
+
+
+# ---------------------------------------------------------------------------
+# Setuptools — how to find the package
+# ---------------------------------------------------------------------------
+
+[tool.setuptools.packages.find]
+include = ["protai*"]
+exclude = ["tests*", "frontend-new*", "data*", "runs*", "docker*", "scripts*", "backend*", "configs*"]
+
+
+[tool.setuptools.package-data]
+# Ship the YAML configs alongside the package so they're available after pip install
+protai = ["py.typed"]
+
+
+# ---------------------------------------------------------------------------
+# Tooling configuration
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["protai/tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    "frontend-new",
+    "data",
+    "runs",
+    "docker",
+    ".git",
+]
