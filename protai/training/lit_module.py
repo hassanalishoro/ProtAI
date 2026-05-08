@@ -102,9 +102,11 @@ class ProtAILitModule(pl.LightningModule):
         self.loss_fn = _build_loss(cfg.train.loss)
         self.target = m.target
 
-        # Validation buffers — collected across batches, computed once at epoch end.
-        self._val_y: List[float] = []
-        self._val_yhat: List[float] = []
+        # Validation buffers — keep tensors ON DEVICE per batch and only sync
+        # to CPU once at epoch end. The previous version called .cpu().tolist()
+        # in every validation_step, forcing a CUDA sync ~100 times per epoch.
+        self._val_y: List[torch.Tensor] = []
+        self._val_yhat: List[torch.Tensor] = []
 
     # ------------------------------------------------------------- forward
 
@@ -143,18 +145,20 @@ class ProtAILitModule(pl.LightningModule):
             self.log(f"val/{k}", v, batch_size=data.num_graphs)
 
         # Stash y / yhat for end-of-epoch correlation metrics.
+        # Keep tensors on-device; we'll concat + transfer once in epoch_end.
         if self.target == "multitask":
             y, yhat = data.y_energy, pred["energy"]
         else:
             y, yhat = data.y, pred
-        self._val_y.extend(y.detach().cpu().flatten().tolist())
-        self._val_yhat.extend(yhat.detach().cpu().flatten().tolist())
+        self._val_y.append(y.detach().flatten())
+        self._val_yhat.append(yhat.detach().flatten())
 
     def on_validation_epoch_end(self):
         if not self._val_y:
             return
-        y = np.array(self._val_y)
-        yhat = np.array(self._val_yhat)
+        # Single GPU→CPU sync at the very end (was: once per val batch).
+        y = torch.cat(self._val_y).float().cpu().numpy()
+        yhat = torch.cat(self._val_yhat).float().cpu().numpy()
         rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
         mae = float(np.mean(np.abs(y - yhat)))
         # Correlations require >= 2 distinct values to be defined.
@@ -186,8 +190,8 @@ class ProtAILitModule(pl.LightningModule):
         # Same metric computation; just rename the prefix.
         if not self._val_y:
             return
-        y = np.array(self._val_y)
-        yhat = np.array(self._val_yhat)
+        y = torch.cat(self._val_y).float().cpu().numpy()
+        yhat = torch.cat(self._val_yhat).float().cpu().numpy()
         rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
         mae = float(np.mean(np.abs(y - yhat)))
         if y.std() > 1e-6 and yhat.std() > 1e-6:

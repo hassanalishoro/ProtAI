@@ -99,49 +99,67 @@ class PreShardedDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx: int) -> Data:
-        record = torch.load(self.files[idx], weights_only=False)
+        # mmap=True memory-maps the underlying tensor storages from the zipfile
+        # instead of reading them all into RAM. For frame_zero / attention_pool
+        # paths we never touch pos_traj, so its bytes stay un-paged — a big win
+        # since pos_traj is ~80% of each .pt file's size (100 frames × 3 floats
+        # per atom × N atoms). Falls back to a normal load if mmap is unsupported
+        # for this file format (older torch saves, network filesystems).
+        path = self.files[idx]
+        try:
+            record = torch.load(path, weights_only=False, mmap=True)
+        except (RuntimeError, TypeError):
+            record = torch.load(path, weights_only=False)
         return self._record_to_data(record)
 
     # ------------------------------------------------------------------ helpers
 
     def _record_to_data(self, rec: dict) -> Data:
+        # Materialize-and-clone helper: when rec was loaded with mmap=True the
+        # tensors are backed by file mappings. We clone them into regular
+        # process memory before they cross the DataLoader worker→main IPC
+        # boundary; otherwise multiprocessing has to pickle file-mapped
+        # storages, which has been a source of flakiness historically.
+        def _take(t: torch.Tensor) -> torch.Tensor:
+            return t.detach().clone() if t is not None else t
+
         # Pick coordinates based on frame strategy.
         if self.frame_strategy == "frame_zero" or "pos_traj" not in rec:
-            pos = rec["pos"]
-            edge_index = rec["edge_index"]
-            edge_attr = rec["edge_attr"]
+            pos = _take(rec["pos"])
+            edge_index = _take(rec["edge_index"])
+            edge_attr = _take(rec["edge_attr"])
         elif self.frame_strategy == "random":
-            traj = rec["pos_traj"]  # (T, N, 3)
+            traj = rec["pos_traj"]  # (T, N, 3) — only this branch reads pos_traj
             t = random.randint(0, traj.shape[0] - 1)
-            pos = traj[t]
+            pos = traj[t].detach().clone()
             edge_index, edge_attr = build_radius_graph(pos, cutoff=self.edge_cutoff)
         elif self.frame_strategy == "mean":
-            pos = rec["pos_traj"].mean(dim=0)
+            pos = rec["pos_traj"].mean(dim=0).detach().clone()
             edge_index, edge_attr = build_radius_graph(pos, cutoff=self.edge_cutoff)
         elif self.frame_strategy == "attention_pool":
             # Use reference frame for graph topology; model receives full traj.
-            pos = rec["pos"]
-            edge_index = rec["edge_index"]
-            edge_attr = rec["edge_attr"]
+            pos = _take(rec["pos"])
+            edge_index = _take(rec["edge_index"])
+            edge_attr = _take(rec["edge_attr"])
         else:  # pragma: no cover
             raise RuntimeError(f"unhandled frame_strategy {self.frame_strategy!r}")
 
         # Node features.
         if self.node_feature == "one_hot_element":
             from .graph import one_hot_elements
-            x = one_hot_elements(rec["element_idx"])
+            x = one_hot_elements(rec["element_idx"]).contiguous()
         elif self.node_feature == "atomic_number":
-            x = rec["z"].view(-1, 1).float()
+            x = _take(rec["z"]).view(-1, 1).float()
         else:
             raise ValueError(f"Unknown node_feature {self.node_feature!r}")
 
         # Target.
         if self.target == "binding_affinity":
-            y = rec["y_energy_mean"].view(1)
+            y = _take(rec["y_energy_mean"]).view(1)
         elif self.target == "adaptability":
-            y = rec["adaptability"]
+            y = _take(rec["adaptability"])
         elif self.target == "multitask":
-            y = {"energy": rec["y_energy_mean"].view(1), "adaptability": rec["adaptability"]}
+            y = {"energy": _take(rec["y_energy_mean"]).view(1), "adaptability": _take(rec["adaptability"])}
         else:  # pragma: no cover
             raise RuntimeError(f"unhandled target {self.target!r}")
 
@@ -150,7 +168,7 @@ class PreShardedDataset(Dataset):
             pos=pos,
             edge_index=edge_index,
             edge_attr=edge_attr,
-            z=rec["z"],
+            z=_take(rec["z"]),
             pdb_id=rec["pdb_id"],
         )
         # Multitask is a dict; PyG Data only handles tensor / list-of-tensor / scalar.
@@ -162,7 +180,7 @@ class PreShardedDataset(Dataset):
             kwargs["y"] = y
 
         if self.frame_strategy == "attention_pool":
-            kwargs["pos_traj"] = rec["pos_traj"]  # (T, N, 3)
-            kwargs["y_energy_per_frame"] = rec["y_energy_per_frame"]
+            kwargs["pos_traj"] = _take(rec["pos_traj"])  # (T, N, 3)
+            kwargs["y_energy_per_frame"] = _take(rec["y_energy_per_frame"])
 
         return Data(**kwargs)

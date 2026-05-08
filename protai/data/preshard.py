@@ -36,30 +36,49 @@ from .splits import load_split
 
 
 def _compute_adaptability(traj: np.ndarray, device: torch.device | None = None) -> np.ndarray:
-    """Per-atom flexibility = mean pairwise inter-frame distance.
+    """Per-atom flexibility: mean pairwise inter-frame distance.
 
-    Mirrors MISATO's preprocessed `feature_atoms_adaptability` definition:
-    for each atom, average the pairwise distance across all (T choose 2) frame pairs.
+    For each atom, average the Euclidean distance across all unordered pairs
+    of frames (i, j) with i < j. Equivalently, the mean of the strict upper
+    triangle of the per-atom (T, T) frame-distance matrix, with denominator
+    T*(T-1)/2.
+
+    This matches MISATO's preprocessed `feature_atoms_adaptability` exactly.
+    Earlier versions of this function divided by T**2 instead of T*(T-1)/2,
+    which silently scaled adaptability values by (T-1)/T (~1% low for T=100)
+    and included T spurious zeros from the diagonal in the average. Fixed
+    2026-05-08.
 
     Args:
         traj: (T, N, 3) trajectory coordinates.
-        device: torch device to compute on. If CUDA, uses batched torch.cdist
-                (~5-10x faster than the numpy fallback for typical complexes).
+        device: torch device. CUDA uses batched torch.cdist (~5-10x faster
+                than numpy on typical N≈3k complexes).
 
     Returns:
-        (N,) per-atom adaptability score (numpy float32).
+        (N,) per-atom adaptability (numpy float32, units of Å).
     """
+    T = traj.shape[0]
+    if T < 2:
+        # Single frame — adaptability is undefined; return zeros.
+        return np.zeros(traj.shape[1], dtype=np.float32)
+
     if device is not None and device.type == "cuda":
-        # (T, N, 3) -> (N, T, 3); torch.cdist is batched: (N, T, T)
+        # (T, N, 3) -> (N, T, 3); torch.cdist batched: per-atom (T, T) distances.
         coords = torch.from_numpy(traj).to(device).transpose(0, 1)
-        dists = torch.cdist(coords, coords)
-        return dists.mean(dim=(1, 2)).cpu().numpy().astype(np.float32)
+        dists = torch.cdist(coords, coords)  # (N, T, T)
+        # Upper triangle only — exclude diagonal (zeros) and lower triangle (dup).
+        mask = torch.triu(
+            torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1
+        )
+        # dists[:, mask] -> (N, T*(T-1)/2). Mean is over the unique frame pairs.
+        return dists[:, mask].mean(dim=1).cpu().numpy().astype(np.float32)
 
     # Numpy fallback (CPU).
     coords = np.transpose(traj, (1, 0, 2)).astype(np.float32)
     diffs = coords[:, :, None, :] - coords[:, None, :, :]
-    dists = np.sqrt((diffs ** 2).sum(axis=-1))
-    return dists.mean(axis=(1, 2)).astype(np.float32)
+    dists = np.sqrt((diffs ** 2).sum(axis=-1))  # (N, T, T)
+    iu = np.triu_indices(T, k=1)  # upper triangle indices
+    return dists[:, iu[0], iu[1]].mean(axis=1).astype(np.float32)
 
 
 def process_complex(

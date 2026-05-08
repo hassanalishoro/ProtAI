@@ -1,0 +1,479 @@
+PROTAI — CLOUD DEPLOYMENT INSTRUCTIONS & GOTCHAS
+==================================================
+
+READ THIS BEFORE LAUNCHING THE FIRST CLOUD TRAINING RUN.
+
+Last updated: 2026-05-08
+Context: captured during laptop-debug session where we watched throughput
+go from 0.04 -> 0.18 -> 0.22 -> 0.75 it/s as we fixed each issue.
+
+The biggest risks moving to cloud are NOT bugs. They are SILENT REGRESSIONS
+where things appear to work but run 2-10x slower than they should, and you
+only notice after burning $30 on a run that should have been $5.
+
+This file is the checklist that prevents that.
+
+
+==================================================
+FAST PATH: ONE-COMMAND BRING-UP
+==================================================
+
+If you trust the script (read it first if you don't), bring-up is:
+
+  ssh root@<pod-ip>
+  cd /workspace
+  git clone https://github.com/LastPredator/ProtAI.git
+  cd ProtAI
+  bash scripts/cloud_setup.sh
+
+The script does steps 1-3 below: detects versions, installs the protai
+package, installs matching PyG extension wheels, verifies each one
+loads and runs a CUDA op, and confirms the expandable_segments allocator
+is active. It exits non-zero on any failure and tells you which step
+broke. Idempotent — safe to re-run.
+
+Then proceed to step 4 (dataset) and step 5 (preshard) below.
+
+If the script fails, walk through the manual procedure below to isolate
+the failing step.
+
+
+==================================================
+ONE-PAGE PRE-FLIGHT CHECKLIST (do all of these)
+==================================================
+
+[ ] 1. Confirm torch + cuda versions on the pod:
+       py -3.11 -c "import torch; print(torch.__version__, torch.version.cuda)"
+
+[ ] 2. Install torch-scatter / torch-cluster / torch-sparse / torch-spline-conv
+       from the PyG wheel index matching the EXACT torch + cuda combo.
+       (See "Step 3: PyG extension install" below.)
+
+[ ] 3. Verify the wheels actually load (no DLL / so errors):
+       py -3.11 -c "import torch_scatter; import torch_cluster; print('ok')"
+
+[ ] 4. Confirm expandable_segments allocator activated.
+       Launch training. If you DON'T see this warning at startup,
+       the Linux fast path is active:
+         "UserWarning: expandable_segments not supported on this platform"
+       (The protai package auto-selects this on Linux; just verify.)
+
+[ ] 5. Override train.num_workers to 8-12 (Linux uses fork(), so workers
+       are basically free; the Windows default of 2 leaves throughput
+       on the table).
+
+[ ] 6. Override train.batch_size to 32-64 (4090 has 24 GB VRAM, A100 has
+       40-80 GB; the Windows default of 16 was tuned for 8 GB laptop GPUs).
+
+[ ] 7. Watch the first 50 batches:
+         - GPU util > 80%   (in nvidia-smi or `watch -n 1 nvidia-smi`)
+         - No spillover     (Used VRAM well under total VRAM)
+         - Loss decreasing  (train/loss should drop visibly)
+         - it/s stable      (no slowdown over time = no fragmentation)
+
+
+==================================================
+STEP 1: POD SETUP
+==================================================
+
+# Standard Vast.ai PyTorch image is fine. We use Python 3.11.
+# Do NOT pick a 3.12 image — torch-scatter wheels for 3.12 are flaky.
+
+ssh root@<pod-ip>
+cd /workspace      # or wherever the persistent disk is mounted
+
+# Clone the repo
+git clone https://github.com/LastPredator/ProtAI.git
+cd ProtAI
+
+# Verify Python version
+python3.11 --version    # should print Python 3.11.x
+
+
+==================================================
+STEP 2: INSTALL THE PROTAI PACKAGE
+==================================================
+
+# Editable install with all extras. This pulls torch, torch-geometric,
+# pytorch-lightning, h5py, etc.
+python3.11 -m pip install -e ".[api,dev]"
+
+# Verify torch + cuda detected
+python3.11 -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.version.cuda); print('available:', torch.cuda.is_available())"
+
+# Expected output:
+#   torch: 2.6.0+cu124  (or similar)
+#   cuda: 12.4
+#   available: True
+
+
+==================================================
+STEP 3: PYG EXTENSION INSTALL (CRITICAL — DO NOT SKIP)
+==================================================
+
+# This was the single biggest performance fix we hit on Windows: 5x
+# throughput jump when these wheels load correctly. The cloud pod's
+# image typically does NOT include them.
+
+# Replace <pt-version>+<cuda> with what step 2 reported:
+#   torch 2.6.0+cu124  ->  use torch-2.6.0+cu124
+#   torch 2.5.0+cu121  ->  use torch-2.5.0+cu121
+#   etc.
+
+python3.11 -m pip install torch-scatter torch-sparse torch-cluster torch-spline-conv \
+    -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
+
+# Skip pyg-lib unless you have a specific need; it has fewer wheels
+# and is not used by SchNet.
+
+# Verify each loads with no traceback:
+python3.11 -c "import torch_scatter; import torch_cluster; import torch_sparse; import torch_spline_conv; print('all ok')"
+
+# If ANY import fails: the wheel does not match your torch+cuda combo.
+# Browse https://data.pyg.org/whl/ to find the exact matching index URL.
+
+# Quick GPU sanity check that the CUDA scatter kernel is actually firing:
+python3.11 -c "from torch_scatter import scatter_add; import torch; \
+    x = torch.randn(10000, 128, device='cuda'); \
+    idx = torch.randint(0, 1000, (10000,), device='cuda'); \
+    out = scatter_add(x, idx, dim=0); \
+    print('GPU scatter:', out.shape, out.device)"
+
+# Expected: GPU scatter: torch.Size([1000, 128]) cuda:0
+
+
+==================================================
+STEP 4: GET THE DATASET
+==================================================
+
+DATA-ACCESS STRATEGY: download MD.hdf5 fresh on the pod and run preshard
+there. DO NOT upload your local preshard from home — it's regenerable
+data and your home upload bandwidth is the bottleneck (~6-30 hours for
+150 GB at typical home upload speeds, while the pod sits idle eating
+~$3-15 in GPU costs). Pod inbound bandwidth is 1-10 Gbps — downloading
+MD.hdf5 fresh + presharding takes ~45-85 min total, $0.30-$0.70.
+
+# OPTION A (recommended): download MD.hdf5 from Zenodo
+#                          124 GB, ~30-60 min on a typical pod connection.
+mkdir -p data/MD/h5_files
+cd data/MD/h5_files
+wget https://zenodo.org/record/<MISATO-record>/files/MD.hdf5
+cd ../../..
+
+# OPTION B: rsync from another pod or a server with fast outbound only.
+#           Skip this if your only source is a home machine.
+# rsync -avP --partial source:/path/to/MD.hdf5 data/MD/h5_files/
+
+# The split files (data/MD/splits/) ship with the repo, so you don't
+# need to download those.
+
+
+==================================================
+STEP 5: PRE-SHARD THE DATA (one-time)
+==================================================
+
+There are TWO preshard variants. The cloud almost always wants the
+full one. Read both before deciding.
+
+----- VARIANT A (cloud default): FULL preshard ~150 GB -----
+
+This is what you want on cloud. Full trajectories enable the
+frame_strategy ablation (random / mean / attention_pool) which is
+one of the three headline ablations in the paper. Without trajectories
+those experiments cannot run.
+
+On RTX 4090 (with torch_scatter installed): ~15-25 min
+On A100 40GB:                                ~10-15 min
+
+  protai-preshard --h5 data/MD/h5_files/MD.hdf5 --out data/processed --device auto
+
+Then training uses the default config paths:
+
+  protai-train --config configs/headline.yaml --override train.num_workers=12 train.batch_size=32
+
+----- VARIANT B: LITE preshard ~10 GB (frame_zero only) -----
+
+Pos_traj (~80% of each file's bytes, only used by random/mean/
+attention_pool strategies) is excluded. Files shrink ~15x. The
+whole dataset then fits in OS file cache so training stops being
+disk-bound.
+
+You almost certainly DO NOT need this on cloud — Vast.ai pods have
+fast NVMe and Linux's page cache handles the full preshard well.
+Variant B exists for laptop dev iteration where 8 GB VRAM + slow
+Windows random reads make the full preshard painful.
+
+If you have a specific reason to use it on cloud (e.g. running ONLY
+frame_zero ablations on a tight budget):
+
+  protai-preshard --h5 data/MD/h5_files/MD.hdf5 --out data/processed_lite --no-traj --device auto
+
+  protai-train --config configs/headline.yaml \
+      --override data.processed_dir=data/processed_lite \
+                 train.num_workers=12 train.batch_size=32
+
+CRITICAL CAVEAT for Variant B:
+  The dataset class silently falls back to frame_zero when pos_traj
+  is missing — no crash, no warning. If you accidentally launch a
+  random/mean/attention_pool ablation against the lite preshard,
+  you get frame_zero results labelled as random. DO NOT mix.
+
+  Safe rule: keep the two preshards in separate directories AND
+  set processed_dir explicitly in every override. Never default.
+
+----- VERIFY (either variant) -----
+
+  # Cheap path: counts, schema, splits coverage
+  python3.11 scripts/verify_preshard.py
+
+  # Deep path (RUN THIS AT LEAST ONCE after fresh preshard):
+  # opens 200 random files and checks for NaN/Inf, edge_index validity,
+  # atomic-number range, adaptability >= 0, energy in kcal/mol range.
+  # Takes ~30-60 seconds. Catches silent corruption that would only
+  # otherwise show up at training time as garbage gradients.
+  python3.11 scripts/verify_preshard.py --deep
+
+  # For non-default directories:
+  python3.11 scripts/verify_preshard.py --deep --processed-dir data/processed_lite
+
+  du -sh data/processed       # ~150 GB for variant A
+  du -sh data/processed_lite  # ~10 GB for variant B
+
+----- KNOWN-VERIFIED INVARIANTS (from 2026-05-08 audit) -----
+
+These have been confirmed against MD.hdf5; you do not need to re-check
+them on cloud. Listed so you have the right expectations:
+
+  * Energy units:    kcal/mol  (sampled 50 complexes, median per-complex
+                                mean = -28.8, range [-180, +25] —
+                                consistent with AMBER protein-ligand
+                                interaction energies in kcal/mol)
+  * Atom counts:     median ~2400 heavy atoms, range ~1100 to ~12000
+                     (after H + solvent stripping)
+  * Edge counts:     median ~38000 edges per complex at 4.5 Å cutoff
+                     (~16 edges/atom average)
+  * Adaptability:    fixed 2026-05-08 to use upper-triangle-only,
+                     T*(T-1)/2 denominator. Earlier preshards had ~1%
+                     systematic underestimate. If you re-preshard now,
+                     you get the corrected definition automatically.
+
+
+==================================================
+STEP 6: LAUNCH TRAINING
+==================================================
+
+# Cloud-tuned overrides (different from laptop defaults!):
+#   num_workers=12       Linux fork() makes workers cheap
+#   batch_size=32        4090 VRAM supports it; A100 can do 64
+#   max_epochs=50        the real training length, not the 10-epoch
+#                        sanity check we did on the laptop
+
+# Single ablation cell:
+protai-train --config configs/arch_target_grid/schnet_binding_affinity.yaml \
+    --override train.max_epochs=50 train.num_workers=12 train.batch_size=32
+
+# Headline run:
+protai-train --config configs/headline.yaml \
+    --override train.num_workers=12 train.batch_size=32
+
+# All ablation cells in sequence (write a small bash loop or use the
+# existing scripts/run_ablations.sh if/when we add it).
+
+
+==================================================
+PERFORMANCE TARGETS (so you know if something's wrong)
+==================================================
+
+Hardware           | Expected it/s (SchNet, batch=32)  | Time per epoch
+-------------------+-----------------------------------+-----------------
+RTX 4070 Laptop    | 0.6 - 0.8                         | ~15 min
+RTX 4090 (Vast.ai) | 2.5 - 4.0                         | ~3-5 min
+A100 40GB          | 4.0 - 6.0                         | ~2-3 min
+H100               | 8.0 - 12.0                        | ~1-1.5 min
+
+If you're significantly below these on the same hardware, ONE of these
+is wrong (in order of likelihood):
+
+  1. torch-scatter wheels not loaded -> CPU fallback paths are running
+  2. expandable_segments not active  -> VRAM fragmentation -> spillover
+  3. num_workers too low             -> data loading is the bottleneck
+  4. Disk too slow                   -> rare on Vast.ai NVMe; common on
+                                        cheap shared storage tiers
+  5. Other process using the GPU    -> check with nvidia-smi
+
+
+==================================================
+COST ESTIMATES
+==================================================
+
+Vast.ai RTX 4090 typical price: $0.30 - $0.50 / hr
+Vast.ai A100 40GB typical:      $1.00 - $1.50 / hr
+
+Workload                          | 4090 hours | 4090 cost
+----------------------------------+------------+-----------
+Single ablation cell, 50 epochs   | 3-4        | $1-2
+Architecture x Target grid (4)    | 12-16      | $4-8
+Frame strategy ablation (3)       | 9-12       | $3-6
+Headline (3 seeds)                | 9-12       | $3-6
+Cross-dataset eval                | 1          | $0.50
+
+Total for full paper experiments:   ~$15 - $25
+
+Add 50% for re-runs / mistakes / forgotten configs.
+Realistic budget:                   ~$30 - $40 total.
+
+
+==================================================
+THINGS WE WORKED AROUND ON WINDOWS THAT DON'T NEED
+WORKAROUNDS ON LINUX (background, not action items)
+==================================================
+
+These are listed so future-you understands WHY the code is the way it
+is, and which workarounds could be removed when we eventually drop
+Windows support entirely:
+
+1. Custom build_radius_graph in protai/data/graph.py
+   - Reason: torch_cluster.radius_graph DLL failed to load on Windows.
+   - As of 2026-05-08: graph.py auto-detects torch_cluster at import
+     time and uses it preferentially when available. On Linux pods
+     with proper PyG wheels (installed by cloud_setup.sh) the fast
+     path activates automatically — 2-4x faster radius graph build
+     for frame_strategy=random/mean. The cKDTree / torch.cdist
+     fallbacks are kept for Windows / no-extensions environments.
+
+2. mmap=True in dataset __getitem__
+   - Reason: reduces memory pressure when frame_strategy=frame_zero
+     skips the pos_traj tensor (which is ~80% of file size).
+   - On Linux: still helpful, no change needed.
+
+3. The _take() clone helper in PreShardedDataset._record_to_data
+   - Reason: defensive copy so mmap'd tensors don't cross worker IPC
+     with file backing still attached.
+   - On Linux: harmless; Linux's fork() handles mmap'd tensors better
+     but the clone doesn't hurt.
+
+4. PYTORCH_CUDA_ALLOC_CONF auto-selection in protai/__init__.py
+   - Already auto-detects platform. No action needed.
+
+
+==================================================
+THINGS TO REMEMBER ABOUT BEHAVIOR DIFFERENCES
+==================================================
+
+a) Workers: Linux fork() means worker processes share the parent's
+   memory pages until they write. Windows spawn() means each worker
+   re-imports torch and re-loads the dataset metadata. Practical:
+   on Linux you can crank num_workers way up (12+) almost for free;
+   on Windows each worker costs ~1.5 GB of RAM.
+
+b) File caching: Linux's page cache is more aggressive than Windows'.
+   After the first epoch, expect the dataset to be cached in RAM if
+   the pod has enough memory (a 4090 pod with 64 GB RAM can cache the
+   entire 150 GB dataset's frame_zero hot set after one pass).
+
+c) Shared GPU memory: this concept exists differently on Linux. There's
+   no "Shared GPU memory" bar in nvidia-smi like Windows shows in
+   Task Manager. The right thing to watch is just nvidia-smi's "Memory
+   Usage" column. If it ever shows >95% during normal training, you
+   need to reduce batch size.
+
+
+==================================================
+COMMANDS YOU'LL ACTUALLY RUN MOST OFTEN
+==================================================
+
+# Watch GPU live
+watch -n 1 nvidia-smi
+
+# Tail the training logs
+tail -f runs/<run_name>/events.out.tfevents.*    # not human-readable
+# Better: launch tensorboard on the pod and SSH-tunnel port 6006
+tensorboard --logdir runs --port 6006
+
+# Run all 4 architecture-target cells in sequence (write this script
+# if not already present):
+for cfg in configs/arch_target_grid/*.yaml; do
+    protai-train --config $cfg --override train.num_workers=12 train.batch_size=32 train.max_epochs=50
+done
+
+# Stop a run cleanly: Ctrl+C in the training terminal. Lightning saves
+# `last.ckpt` automatically and you can resume with --ckpt last.ckpt
+
+
+==================================================
+WHEN YOU'RE DONE: BEFORE TEARING DOWN THE POD
+==================================================
+
+[ ] rsync runs/ back to your local box
+    (checkpoints + tensorboard logs; ~few hundred MB total)
+[ ] Optionally rsync data/processed/ if you want a local copy
+    (~150 GB; only worth doing if your home connection can handle it)
+[ ] Save the resolved_config.yaml from each run (git add + commit so
+    the exact configs are reproducible)
+[ ] Note the final GPU type, image, and total cost in your lab notebook
+
+
+==================================================
+CHANGE LOG (update this file as we learn more)
+==================================================
+
+2026-05-08  Initial version. Captured laptop-debug session findings:
+            - PYTORCH_CUDA_ALLOC_CONF auto-detection
+            - torch-scatter wheel install procedure
+            - num_workers / batch_size cloud-vs-laptop differences
+            - performance targets table
+
+2026-05-08  Hard-learned lesson: do NOT set
+            PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 on Windows.
+            It dropped throughput from 0.18 → 0.07 it/s and pushed
+            shared GPU memory from 12 GB to 15 GB (max). Default
+            allocator on Windows beats the "fix" we tried.
+            Code now sets expandable_segments only on Linux and
+            leaves Windows untouched.
+
+2026-05-08  Added Variant B (lite preshard, --no-traj) to step 5.
+            Used on laptop to escape disk-cache-exhaustion for
+            frame_zero-only runs. NOT recommended on cloud unless
+            you're running frame_zero ablations only.
+            Added the silent-fallback caveat — dataset will not warn
+            if you point a random/mean/attention_pool run at a lite
+            preshard; results will be wrong, not crashed.
+
+2026-05-08  Three concrete cloud-prep changes landed:
+            (a) protai/data/graph.py auto-detects torch_cluster and
+                uses its native CUDA radius_graph when available.
+                2-4x faster graph build for non-frame_zero strategies.
+                Falls back transparently when the C++ extension can't
+                load (Windows). No config knob, no manual switch.
+            (b) scripts/cloud_setup.sh added — one-command pod bring-
+                up with version detection, PyG wheel install, runtime
+                verification, and allocator-config check. Idempotent.
+            (c) "FAST PATH" section added at top of this file pointing
+                at the script for users who want to skip reading the
+                manual procedure.
+
+2026-05-08  Preshard audit + three fixes:
+            (1) Verified energy units = kcal/mol against MD.hdf5
+                (sampled 50 complexes; median -28.8, range [-180, +25],
+                consistent with AMBER protein-ligand interaction
+                energies). Documented in invariants section above.
+            (2) Fixed adaptability scaling in protai/data/preshard.py.
+                Previously divided by T**2 (including diagonal zeros);
+                now uses upper triangle only with denominator T*(T-1)/2.
+                Result: ~1% larger values that exactly match the
+                "(T choose 2) frame pairs" docstring definition.
+                Earlier preshards have a 1% systematic underestimate;
+                re-presharding on cloud gets the correct values.
+            (3) Beefed up scripts/verify_preshard.py with --deep mode:
+                samples 200 random files and checks NaN/Inf, edge_index
+                validity, atomic-number range, adaptability >= 0,
+                energy in kcal/mol range, schema consistency, pos_traj
+                shape consistency. RUN --deep AT LEAST ONCE AFTER ANY
+                FRESH PRESHARD. Smoke-tested against existing local
+                preshard: 30/30 files clean.
+
+            Data-access strategy clarified in step 4: re-preshard on
+            cloud, do NOT upload your laptop preshard. Home upload
+            speed is the bottleneck and the data is regenerable.
+
+[add entries here as we ship cloud runs]

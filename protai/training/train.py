@@ -12,7 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+# Note: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True is set in
+# protai/__init__.py to guarantee it lands before torch CUDA init.
+
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch_geometric.loader import DataLoader
@@ -20,6 +24,20 @@ from torch_geometric.loader import DataLoader
 from ..config import Config, resolve_path
 from ..data import PreShardedDataset
 from .lit_module import ProtAILitModule
+
+
+# ---------------------------------------------------------------------------
+# `set_float32_matmul_precision("high")`:
+#     Lets cuBLAS use TF32 on Ampere+ (RTX 30xx / 40xx / A100 / H100). 10–15%
+#     throughput win for fp32 matmuls (optimizer step, reductions); bf16
+#     mixed-precision paths unaffected.
+#
+# Note: we deliberately do NOT enable `cudnn.benchmark`. It autotunes conv
+# kernels and keeps speculative workspace allocated — pure waste for SchNet
+# (no conv layers) and actively harmful with our variable-shape graph batches
+# where there's no stable shape for it to cache against.
+# ---------------------------------------------------------------------------
+torch.set_float32_matmul_precision("high")
 
 
 def _apply_overrides(cfg: Config, overrides: List[str]) -> Config:
@@ -93,18 +111,36 @@ def main():
 
     print(f"[train] train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
+    # DataLoader perf knobs:
+    #   pin_memory=True            → faster H2D copies (page-locked staging buffer)
+    #   persistent_workers=True    → don't tear down/respawn workers between epochs
+    #                                (especially expensive on Windows where
+    #                                multiprocessing uses spawn, not fork)
+    #   prefetch_factor=4          → each worker queues up 4 batches ahead of the
+    #                                GPU so disk I/O overlaps with compute
+    nw = max(0, int(cfg.train.num_workers))
+    nw_eval = max(0, nw // 2) if nw > 0 else 0
+    loader_kwargs = dict(pin_memory=True)
+    if nw > 0:
+        loader_kwargs["prefetch_factor"] = 4
+
     train_loader = DataLoader(
         train_ds, batch_size=cfg.train.batch_size, shuffle=True,
-        num_workers=cfg.train.num_workers, pin_memory=True,
-        persistent_workers=cfg.train.num_workers > 0,
+        num_workers=nw, persistent_workers=nw > 0,
+        **loader_kwargs,
     )
+    eval_loader_kwargs = dict(pin_memory=True)
+    if nw_eval > 0:
+        eval_loader_kwargs["prefetch_factor"] = 4
     val_loader = DataLoader(
         val_ds, batch_size=cfg.train.batch_size, shuffle=False,
-        num_workers=max(0, cfg.train.num_workers // 2), pin_memory=True,
+        num_workers=nw_eval, persistent_workers=nw_eval > 0,
+        **eval_loader_kwargs,
     )
     test_loader = DataLoader(
         test_ds, batch_size=cfg.train.batch_size, shuffle=False,
-        num_workers=max(0, cfg.train.num_workers // 2), pin_memory=True,
+        num_workers=nw_eval, persistent_workers=nw_eval > 0,
+        **eval_loader_kwargs,
     )
 
     # Module + callbacks + trainer.

@@ -6,6 +6,13 @@ comprehensions, and a bare `except:`. This version:
   * Vectorizes edge-distance computation with `torch.norm`
   * Vectorizes one-hot encoding via `F.one_hot`
   * Surfaces errors instead of swallowing them
+
+Implementation strategy: prefers `torch_cluster.radius_graph` (native CUDA,
+2-4x faster for sparse graphs) when available, falls back to torch.cdist on
+GPU or cKDTree on CPU otherwise. The fallback exists because torch_cluster
+ships C++ extensions that fail to load on Windows when there's any
+torch/CUDA version skew — extremely common in practice. On Linux pods with
+correctly-installed PyG wheels the fast path activates automatically.
 """
 from __future__ import annotations
 
@@ -17,6 +24,17 @@ import torch.nn.functional as F
 from scipy.spatial import cKDTree
 
 from ..config import N_ELEMENT_CLASSES
+
+
+# Detect torch_cluster at import time. ImportError covers "not installed";
+# OSError covers "installed but DLL/so failed to load" (the WinError 127
+# case we hit constantly on Windows due to torch/CUDA version mismatches).
+try:
+    from torch_cluster import radius_graph as _tc_radius_graph  # type: ignore
+    _HAS_TORCH_CLUSTER = True
+except (ImportError, OSError):
+    _tc_radius_graph = None  # type: ignore
+    _HAS_TORCH_CLUSTER = False
 
 
 def build_radius_graph(
@@ -50,9 +68,41 @@ def build_radius_graph(
             torch.zeros((0,), dtype=torch.float32, device=device),
         )
 
+    # Fast path: native torch_cluster (CUDA + CPU). Activates on Linux pods
+    # with the PyG extension wheels installed; gracefully unavailable on
+    # Windows where the C++ extension fails to load.
+    if _HAS_TORCH_CLUSTER:
+        return _build_torch_cluster(pos, cutoff, eps)
+
+    # Fallback paths (kept working for Windows / no-extensions environments).
     if pos.is_cuda:
         return _build_gpu(pos, cutoff, eps)
     return _build_cpu(pos, cutoff, eps)
+
+
+def _build_torch_cluster(
+    pos: torch.Tensor, cutoff: float, eps: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Native CUDA / CPU radius search via torch_cluster.
+
+    `radius_graph(loop=False)` returns a directed edge tensor (2, E) that
+    already includes both directions for each radius pair (the radius
+    relation is symmetric), matching the convention of our cdist/cKDTree
+    paths exactly. `max_num_neighbors=128` is safely above what protein
+    complexes produce at typical 4.5 Å cutoffs (median ~10-12 neighbors).
+    """
+    edge_index = _tc_radius_graph(  # type: ignore[misc]
+        pos, r=cutoff, loop=False, max_num_neighbors=128
+    )
+    if edge_index.numel() == 0:
+        return (
+            torch.zeros((2, 0), dtype=torch.long, device=pos.device),
+            torch.zeros((0,), dtype=torch.float32, device=pos.device),
+        )
+    src, dst = edge_index[0], edge_index[1]
+    edge_dists = (pos[src] - pos[dst]).norm(dim=1)
+    edge_attr = (1.0 / (edge_dists + eps)).to(torch.float32)
+    return edge_index, edge_attr
 
 
 def _build_gpu(
