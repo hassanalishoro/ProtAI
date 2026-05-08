@@ -43,9 +43,20 @@ CUDA_VER=$(python3.11 -c 'import torch; v=torch.version.cuda; print("" if v is N
 
 # Install the protai package itself (editable). After this, torch is
 # guaranteed present even if the pod image was minimal.
+#
+# Two notes:
+#   * We install only [dev], NOT [api]. The cloud pod is for training, not
+#     serving the Flask backend. Skipping flask sidesteps a known conflict
+#     on Ubuntu-based RunPod images where `blinker 1.4` is installed via
+#     distutils and pip can't safely uninstall it to upgrade for Flask 3.x.
+#   * --ignore-installed blinker is a defensive belt-and-braces: even some
+#     transitive deps occasionally pull a Flask requirement, and forcing a
+#     fresh blinker install (alongside the system one) avoids the
+#     uninstall-distutils-installed-package error.
 say "Installing protai package"
 python3.11 -m pip install --upgrade pip wheel >/dev/null
-python3.11 -m pip install -e ".[api,dev]"
+python3.11 -m pip install --ignore-installed blinker >/dev/null
+python3.11 -m pip install -e ".[dev]"
 ok "protai installed"
 
 # Re-detect versions in case torch was just installed.
