@@ -375,16 +375,49 @@ class ProtAILitModule(pl.LightningModule):
 
     @staticmethod
     def _compute_metrics(y: np.ndarray, yhat: np.ndarray, prefix: str) -> Dict[str, float]:
-        """Standard regression metrics. RMSE/MAE in target units, R²/Pearson/Spearman dimensionless."""
+        """Standard regression metrics. RMSE/MAE in target units, R²/Pearson/Spearman dimensionless.
+
+        Defensively filters NaN/Inf predictions before computing — bf16-mixed
+        precision occasionally produces a NaN for a single complex (e.g.,
+        atypical structure triggering an overflow in the message-passing
+        steps), and a single NaN would otherwise corrupt every aggregate.
+
+        Returns 0.0 (not NaN) when variance is too small for correlation —
+        Lightning's EarlyStopping treats NaN as "stop now" and would kill
+        epoch 0 before the model has differentiated its outputs enough.
+        """
+        # Drop any NaN/Inf in either array before computing aggregates.
+        finite_mask = np.isfinite(y) & np.isfinite(yhat)
+        n_dropped = int((~finite_mask).sum())
+        if n_dropped > 0:
+            print(f"[lit_module] WARN: dropped {n_dropped}/{len(y)} non-finite "
+                  f"values from {prefix} metrics (likely bf16 numerical artifact)")
+        y = y[finite_mask]
+        yhat = yhat[finite_mask]
+
+        if len(y) == 0:
+            # Pathological case: all predictions were NaN. Return zeros so
+            # EarlyStopping doesn't bail.
+            return {f"{prefix}/{k}": 0.0
+                    for k in ("rmse", "mae", "pearson", "spearman", "r2")}
+
         rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
         mae = float(np.mean(np.abs(y - yhat)))
-        # Correlation needs nonzero variance on both sides.
+        # Correlation requires nonzero variance on both sides. At epoch 0
+        # the model hasn't differentiated outputs yet (variance ~0), so
+        # pearson is undefined. Return 0.0 instead of NaN so EarlyStopping
+        # treats it as "no improvement yet" rather than "stop immediately."
         if y.std() > 1e-6 and yhat.std() > 1e-6:
             pearson = float(np.corrcoef(y, yhat)[0, 1])
             spearman = float(spearmanr(y, yhat).statistic)
+            # corrcoef can still return NaN if inputs are pathological.
+            if not np.isfinite(pearson):
+                pearson = 0.0
+            if not np.isfinite(spearman):
+                spearman = 0.0
         else:
-            pearson = float("nan")
-            spearman = float("nan")
+            pearson = 0.0
+            spearman = 0.0
         ss_res = float(np.sum((y - yhat) ** 2))
         ss_tot = float(np.sum((y - y.mean()) ** 2)) or 1.0
         r2 = 1.0 - ss_res / ss_tot

@@ -262,6 +262,9 @@ def _make_callbacks(cfg: Config, run_dir: Path) -> List[pl.Callback]:
             mode=MONITOR_MODE,
             patience=cfg.train.early_stop_patience,
             min_delta=cfg.train.early_stop_min_delta,
+            # Don't kill training on NaN — the lit_module already handles
+            # transient NaN by returning 0.0, but this is defensive insurance.
+            check_finite=False,
         ),
         LearningRateMonitor(logging_interval="epoch"),
     ]
