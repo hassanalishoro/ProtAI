@@ -146,14 +146,22 @@ def main():
     # Module + callbacks + trainer.
     module = ProtAILitModule(cfg)
 
+    # Monitor val/pearson (mode=max) for both checkpointing and early stopping.
+    # Why pearson:
+    #   * It's the metric that matters for binding-affinity ranking tasks
+    #   * RMSE/MAE are dominated by a few outlier complexes (e.g., 4CP5 at
+    #     -675 kcal/mol) and barely move during training, causing premature
+    #     early stopping and poor checkpoint selection
+    #   * Pearson rank-correlates predictions with truth and improves smoothly
+    #     epoch-by-epoch as the model learns
     callbacks = [
         ModelCheckpoint(
             dirpath=str(run_dir), filename="best",
-            monitor="val/rmse", mode="min", save_top_k=1, save_last=True,
+            monitor="val/pearson", mode="max", save_top_k=1, save_last=True,
         ),
         EarlyStopping(
-            monitor="val/rmse", patience=cfg.train.early_stop_patience,
-            min_delta=cfg.train.early_stop_min_delta, mode="min",
+            monitor="val/pearson", patience=cfg.train.early_stop_patience,
+            min_delta=cfg.train.early_stop_min_delta, mode="max",
         ),
         LearningRateMonitor(logging_interval="epoch"),
     ]

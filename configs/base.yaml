@@ -1,5 +1,11 @@
 # Base config — all other configs inherit defaults from protai.config and
 # override what they need. This file is the canonical "sane defaults" anchor.
+#
+# Defaults reflect what we learned during cloud training:
+#   * loss=mse paired with target normalization (in lit_module) trains cleanly
+#   * grad_clip=10 lets gradients flow at meaningful magnitudes
+#   * early stopping monitors val/pearson (in train.py) which actually moves
+#   * patience=15 gives noisy pearson curves room to recover
 
 data:
   raw_h5: "data/MD/h5_files/MD.hdf5"
@@ -26,14 +32,14 @@ model:
   graph_pool: "mean"
 
 train:
-  batch_size: 16
+  batch_size: 32
   num_workers: 4
   max_epochs: 50
   learning_rate: 1.0e-3
   weight_decay: 1.0e-5
   optimizer: "adamw"
-  grad_clip: 1.0
-  loss: "huber"
+  grad_clip: 10.0           # was 1.0 — too tight for raw kcal/mol grads
+  loss: "mse"               # was "huber" — Huber on unnormalized targets fails
   lr_schedule: "cosine"
   warmup_epochs: 2
   dropout: 0.1
@@ -41,7 +47,7 @@ train:
   precision: "bf16-mixed"
   accelerator: "auto"
   devices: "auto"
-  early_stop_patience: 8
+  early_stop_patience: 15   # was 8 — pearson curve can dip slightly between climbs
   early_stop_min_delta: 1.0e-4
   log_dir: "runs"
   run_name: null

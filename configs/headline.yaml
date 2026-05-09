@@ -21,7 +21,8 @@ train:
   max_epochs: 80
   learning_rate: 5.0e-4
   weight_decay: 1.0e-5
-  loss: "huber"
+  loss: "mse"               # Huber on unnormalized targets clips gradients flat
+  grad_clip: 10.0           # Allow gradients to flow at meaningful magnitudes
   precision: "bf16-mixed"
-  early_stop_patience: 12
+  early_stop_patience: 15
   seed: 42
