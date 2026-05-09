@@ -44,19 +44,46 @@ CUDA_VER=$(python3.11 -c 'import torch; v=torch.version.cuda; print("" if v is N
 # Install the protai package itself (editable). After this, torch is
 # guaranteed present even if the pod image was minimal.
 #
-# Two notes:
-#   * We install only [dev], NOT [api]. The cloud pod is for training, not
-#     serving the Flask backend. Skipping flask sidesteps a known conflict
-#     on Ubuntu-based RunPod images where `blinker 1.4` is installed via
-#     distutils and pip can't safely uninstall it to upgrade for Flask 3.x.
-#   * --ignore-installed blinker is a defensive belt-and-braces: even some
-#     transitive deps occasionally pull a Flask requirement, and forcing a
-#     fresh blinker install (alongside the system one) avoids the
-#     uninstall-distutils-installed-package error.
+# Three defensive layers against distutils-installed-package conflicts:
+#
+# 1. We install only [dev], NOT [api]. Skipping Flask sidesteps the
+#    Ubuntu blinker 1.4 distutils-installed conflict at the source.
+#
+# 2. Pre-install known-conflicting packages with --ignore-installed.
+#    These are packages that ship pre-installed via Ubuntu apt (which
+#    uses distutils, which pip cannot safely uninstall to upgrade).
+#    Forcing a fresh pip install layered on top avoids the
+#    "uninstall-distutils-installed-package" error.
+#
+# 3. If the editable install still fails (some new transitive dep we
+#    haven't seen yet), retry with a broader --ignore-installed list
+#    including more system packages, then try once more. If that also
+#    fails, fall back to `--no-deps` to install just protai itself
+#    (deps that were already satisfied stay; missing ones get flagged
+#    later when they're actually imported).
 say "Installing protai package"
 python3.11 -m pip install --upgrade pip wheel >/dev/null
-python3.11 -m pip install --ignore-installed blinker >/dev/null
-python3.11 -m pip install -e ".[dev]"
+
+# Layer 2: pre-install known distutils-conflicts.
+KNOWN_DISTUTILS_PACKAGES="blinker"
+python3.11 -m pip install --ignore-installed ${KNOWN_DISTUTILS_PACKAGES} >/dev/null 2>&1 || true
+
+# Layer 3: install with retry on conflict.
+if ! python3.11 -m pip install -e ".[dev]" 2>/tmp/pip_err.log; then
+    warn "First install attempt failed; retrying with broader --ignore-installed..."
+    cat /tmp/pip_err.log | tail -5 >&2
+    # Broader list — covers the most common Ubuntu distutils packages that
+    # newer pip resolutions try to upgrade.
+    BROADER="blinker six pyOpenSSL python-dateutil PyYAML chardet"
+    python3.11 -m pip install --ignore-installed ${BROADER} >/dev/null 2>&1 || true
+    if ! python3.11 -m pip install -e ".[dev]" 2>/tmp/pip_err.log; then
+        warn "Second install attempt failed; falling back to --no-deps..."
+        cat /tmp/pip_err.log | tail -10 >&2
+        # Last resort: install protai itself without dependency resolution.
+        # Existing torch/torch-geometric/etc on the image satisfy us already.
+        python3.11 -m pip install -e . --no-deps
+    fi
+fi
 ok "protai installed"
 
 # Re-detect versions in case torch was just installed.
