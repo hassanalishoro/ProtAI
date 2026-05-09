@@ -90,15 +90,48 @@ def _build_loss(name: str) -> nn.Module:
 def _compute_target_stats(processed_dir: Path, train_split: Path) -> Tuple[float, float, int, int]:
     """Read training-set y_energy_mean values and return (mean, std, n_used, n_skipped).
 
-    Loads only the small scalar `y_energy_mean` per file (mmap so trajectory
-    bytes never page in). Robust to a few missing or corrupt files — those
-    are just skipped and counted.
+    Cached: writes a small JSON file to processed_dir keyed by a fingerprint
+    of (split file content + processed_dir path). First run takes ~30-60 sec
+    reading 13K+ small files; subsequent runs are instant. Cache invalidates
+    automatically if you re-preshard or change the split list.
+
+    Robust to a few missing or corrupt files — those are skipped and counted.
     """
-    ids = load_split(train_split)
+    import hashlib
+    import json
+
+    # Cache key: hash of (processed_dir absolute path + split file content)
+    split_text = Path(train_split).read_text()
+    fingerprint = hashlib.md5(
+        f"{Path(processed_dir).resolve()}|{split_text}".encode()
+    ).hexdigest()[:12]
+    cache_file = Path(processed_dir) / f".target_stats_{fingerprint}.json"
+
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            return (
+                float(data["mean"]),
+                float(data["std"]),
+                int(data["n_used"]),
+                int(data["n_skipped"]),
+            )
+        except Exception:
+            pass  # fall through and recompute
+
+    # Cache miss: compute fresh, with progress bar so the user sees activity.
+    print(f"[ProtAI] Computing target normalization stats from training set "
+          f"(cache miss; this is a one-time ~1 min cost)...")
+    try:
+        from tqdm import tqdm
+        iterator = tqdm(load_split(train_split), desc="reading targets", unit="cplx")
+    except ImportError:
+        iterator = load_split(train_split)
+
     targets: List[float] = []
     skipped = 0
-    for pid in ids:
-        path = processed_dir / f"{pid}.pt"
+    for pid in iterator:
+        path = Path(processed_dir) / f"{pid}.pt"
         if not path.exists():
             skipped += 1
             continue
@@ -114,7 +147,19 @@ def _compute_target_stats(processed_dir: Path, train_split: Path) -> Tuple[float
     t = torch.tensor(targets, dtype=torch.float32)
     mean = t.mean().item()
     std = max(t.std().item(), 1e-3)  # floor so we never divide by ~0
-    return mean, std, len(targets), skipped
+    n_used = len(targets)
+
+    # Save cache for next time. Don't fail training if cache write fails
+    # (read-only volume, permissions, etc) — just skip.
+    try:
+        cache_file.write_text(json.dumps({
+            "mean": mean, "std": std,
+            "n_used": n_used, "n_skipped": skipped,
+        }))
+    except Exception:
+        pass
+
+    return mean, std, n_used, skipped
 
 
 # ---------------------------------------------------------------------------

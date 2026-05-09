@@ -78,15 +78,26 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    """Training-loop knobs."""
-    batch_size: int = 16
+    """Training-loop knobs.
+
+    Defaults reflect what we learned during cloud training:
+      * loss=mse (Huber on unnormalized kcal/mol clips gradients flat)
+      * grad_clip=10 (1.0 was too tight for raw gradient magnitudes)
+      * batch_size=32 (good GPU utilization at 24 GB VRAM)
+      * early_stop_patience=15 (val/pearson curve dips slightly between climbs)
+
+    These are the values that PRODUCE good training when no override is given.
+    Yaml configs only need to override what's task-specific (model, target,
+    seed, run_name); everything else is sensible by default.
+    """
+    batch_size: int = 32
     num_workers: int = 4
     max_epochs: int = 50
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     optimizer: str = "adamw"
-    grad_clip: float = 1.0
-    loss: str = "huber"  # mse | mae | huber
+    grad_clip: float = 10.0
+    loss: str = "mse"  # mse | mae | huber
 
     # LR schedule
     lr_schedule: str = "cosine"  # none | cosine | reduce_on_plateau
@@ -103,8 +114,8 @@ class TrainConfig:
     accelerator: str = "auto"  # auto | gpu | cpu
     devices: str = "auto"
 
-    # Early stopping
-    early_stop_patience: int = 8
+    # Early stopping (paired with monitor=val/pearson, mode=max in train.py)
+    early_stop_patience: int = 15
     early_stop_min_delta: float = 1e-4
 
     # Output
