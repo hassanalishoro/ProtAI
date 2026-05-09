@@ -39,13 +39,16 @@ from protai.training.lit_module import ProtAILitModule
 
 
 # Map each run name (in runs/) to a human-readable label for the legend.
+# Names use the _random suffix because all final chain runs train on the
+# random-split protocol; the cross-evaluation against the similarity test
+# set is done as a separate step after training.
 RUN_LABELS: Dict[str, str] = {
-    "schnet_aff":           "SchNet, frame zero (arch)",
-    "gnnmd_aff":            "GNN MD, frame zero (arch)",
-    "frame_zero":           "SchNet, frame zero (frame)",
-    "random_frame":         "SchNet, random frame",
-    "headline_s42":         "SchNet headline, seed 42",
-    "headline_s1337":       "SchNet headline, seed 1337",
+    "schnet_aff_random":      "SchNet, frame zero (arch)",
+    "gnnmd_aff_random":       "GNN MD, frame zero (arch)",
+    "frame_zero_random":      "SchNet, frame zero (frame)",
+    "random_frame_random":    "SchNet, random frame",
+    "headline_random_s42":    "SchNet headline, seed 42",
+    "headline_random_s1337":  "SchNet headline, seed 1337",
 }
 
 
@@ -98,7 +101,7 @@ def plot_training_curves(runs_dir: Path, out_path: Path) -> None:
 
 
 def plot_loss_curves(runs_dir: Path, out_path: Path,
-                     headline_run: str = "headline_s42") -> None:
+                     headline_run: str = "headline_random_s42") -> None:
     """Train and val loss for the headline run on a single panel."""
     import matplotlib.pyplot as plt
 
@@ -131,7 +134,7 @@ def plot_loss_curves(runs_dir: Path, out_path: Path,
 
 
 def plot_predictions(runs_dir: Path, out_path: Path,
-                     headline_run: str = "headline_s42") -> None:
+                     headline_run: str = "headline_random_s42") -> None:
     """Predicted-vs-actual scatter for the headline run on the test set."""
     import matplotlib.pyplot as plt
 
@@ -199,7 +202,7 @@ def main() -> None:
                    help="Directory containing per-run subdirectories")
     p.add_argument("--out-dir", default=str(REPO_ROOT / "report_figures"),
                    help="Where to write PNG figures")
-    p.add_argument("--headline-run", default="headline_s42",
+    p.add_argument("--headline-run", default="headline_random_s42",
                    help="Which run to use for loss curves and predictions scatter")
     args = p.parse_args()
 
