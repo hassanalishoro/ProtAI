@@ -71,6 +71,12 @@ def main():
     trainer.test(module, loader)
 
     # Re-collect predictions for richer metrics + dump.
+    # IMPORTANT: the model's forward returns predictions in NORMALIZED z-score
+    # space for any target trained with target normalization (binding_affinity,
+    # log_k, and the energy head of multitask_*). Denormalize before computing
+    # RMSE/MAE — otherwise the JSON contains z-score units while batch.y is in
+    # the target's original units, and RMSE/MAE come out roughly equal to the
+    # target standard deviation regardless of model quality.
     module.eval()
     ys, yhats = [], []
     import torch
@@ -79,11 +85,21 @@ def main():
         for batch in loader:
             batch = batch.to(device)
             pred = module(batch)
-            if cfg.model.target == "multitask":
-                ys.append(batch.y_energy.cpu().numpy()); yhats.append(pred["energy"].cpu().numpy())
-            else:
+            t = cfg.model.target
+            if t == "multitask":
+                # Legacy energy+adaptability multitask
+                ys.append(batch.y_energy.cpu().numpy().flatten())
+                yhats.append(module._denormalize(pred["energy"]).cpu().numpy().flatten())
+            elif t == "multitask_logk_energy":
+                # New log_K + energy multitask — headline is the log_K head.
+                ys.append(batch.y_logk.cpu().numpy().flatten())
+                yhats.append(module._denormalize(pred["logk"]).cpu().numpy().flatten())
+            elif t == "adaptability":
                 ys.append(batch.y.cpu().numpy().flatten())
                 yhats.append(pred.cpu().numpy().flatten())
+            else:  # binding_affinity, log_k — single-scalar normalized targets
+                ys.append(batch.y.cpu().numpy().flatten())
+                yhats.append(module._denormalize(pred).cpu().numpy().flatten())
 
     y = np.concatenate(ys); yhat = np.concatenate(yhats)
     m = _metrics(y, yhat)

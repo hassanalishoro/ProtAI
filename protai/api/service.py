@@ -19,22 +19,57 @@ from ..data.graph import build_radius_graph, one_hot_elements
 from ..training.lit_module import ProtAILitModule
 
 
+# Run-dir name prefixes that indicate junk/sanity training and should never
+# back the live demo. Edit here if you adopt new naming conventions.
+_SKIP_PREFIXES = ("tiny_", "sanity_", "debug_", "test_", "smoke_")
+
+# Preferred run names in priority order — first match wins. Lets the demo
+# auto-pick the headline checkpoint without needing PROTAI_MODEL_PATH set.
+_PREFERRED_RUNS = (
+    "random_frame_random",   # headline: trajectory-aware on random split
+    "random_frame",          # legacy alias
+    "headline",              # explicit headline alias if present
+    "schnet_aff_random",     # next-best architecture cell
+)
+
+
 def find_latest_best_checkpoint(logs_dir: Path) -> Optional[Path]:
-    """Pick the most recent run dir containing a `best.ckpt` (Lightning) or
-    `best_model.pt` (legacy)."""
+    """Pick the right `best.ckpt` for the demo.
+
+    Priority order:
+        1. Any run whose name appears in `_PREFERRED_RUNS` (in that order).
+        2. Otherwise, the most recently modified run dir, after filtering
+           out junk names listed in `_SKIP_PREFIXES`.
+
+    Falls back to legacy `best_model.pt` when `best.ckpt` is missing.
+    Set the env var `PROTAI_MODEL_PATH` to override entirely.
+    """
     if not logs_dir.exists():
         return None
-    candidates = []
+
+    candidates: list[Path] = []
     for run in logs_dir.iterdir():
         if not run.is_dir():
+            continue
+        if any(run.name.startswith(p) for p in _SKIP_PREFIXES):
             continue
         for name in ("best.ckpt", "best_model.pt"):
             ckpt = run / name
             if ckpt.exists():
                 candidates.append(ckpt)
                 break
-    candidates.sort(key=lambda p: p.parent.name, reverse=True)
-    return candidates[0] if candidates else None
+
+    if not candidates:
+        return None
+
+    by_name = {c.parent.name: c for c in candidates}
+    for preferred in _PREFERRED_RUNS:
+        if preferred in by_name:
+            return by_name[preferred]
+
+    # Fall back to most recently modified checkpoint.
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
 
 
 class ProtAIService:
@@ -205,10 +240,25 @@ class ProtAIService:
 
         with torch.no_grad():
             pred = self.module(batch)
+
+        # IMPORTANT: model output is in NORMALIZED z-score space for any
+        # target trained with target normalization. Denormalize before
+        # exposing through the API, otherwise the demo shows z-scores while
+        # the "true" reference is in kcal/mol — a single 1A1B request would
+        # display "predicted -0.23" against "true -115" and look broken.
+        target = self.module.cfg.model.target
         if isinstance(pred, dict):
-            pred_val = float(pred["energy"].item())
-        else:
+            # Multitask: pick the head whose label we're showing as the
+            # primary prediction (energy for legacy multitask, logk for new).
+            head_name = "logk" if target == "multitask_logk_energy" else "energy"
+            raw = pred[head_name]
+            pred_val = float(self.module._denormalize(raw).item())
+        elif target == "adaptability":
+            # Per-atom raw target; no normalization applied during training.
             pred_val = float(pred.flatten()[0].item())
+        else:
+            # Single-scalar normalized targets: binding_affinity, log_k.
+            pred_val = float(self.module._denormalize(pred).flatten()[0].item())
 
         return {
             "pdb_id": pdb_id,
@@ -280,9 +330,25 @@ class ProtAIService:
 
     @staticmethod
     def _compute_adaptability(traj: np.ndarray) -> np.ndarray:
+        """Per-atom mean pairwise inter-frame distance, upper-triangle only.
+
+        Matches the formula used by `protai/data/preshard.py` (fixed
+        2026-05-08): for each atom, average over the unique frame-pair
+        distances (T*(T-1)/2 pairs) rather than the full T×T matrix. The
+        full-matrix version double-counts each pair and dilutes the value
+        with the T zero-distance diagonal entries.
+        """
+        # traj: (T, N, 3). Transpose to (N, T, 3) so each atom owns a (T, 3) block.
         coords = np.transpose(traj, (1, 0, 2)).astype(np.float32)
-        diffs = coords[:, :, None, :] - coords[:, None, :, :]
-        return np.sqrt((diffs ** 2).sum(axis=-1)).mean(axis=(1, 2))
+        n_atoms, t = coords.shape[0], coords.shape[1]
+        if t < 2:
+            return np.zeros(n_atoms, dtype=np.float32)
+        # Upper-triangular pair indices (i < j) — same convention as preshard.
+        iu, ju = np.triu_indices(t, k=1)
+        # (N, P, 3) where P = T*(T-1)/2; squared distance then sqrt + mean.
+        diffs = coords[:, iu, :] - coords[:, ju, :]
+        dist = np.sqrt((diffs ** 2).sum(axis=-1))
+        return dist.mean(axis=1)
 
 
 # Singleton accessor — lets routes.py grab the same instance on every request.
