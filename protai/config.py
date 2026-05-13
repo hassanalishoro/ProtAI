@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import yaml
 
@@ -59,7 +59,13 @@ class DataConfig:
 class ModelConfig:
     """Architecture selection + hyperparameters."""
     name: str = "schnet"  # gnn_md | schnet
-    target: str = "binding_affinity"  # binding_affinity | adaptability | multitask
+    target: str = "binding_affinity"
+    # Supported targets:
+    #   binding_affinity         — MISATO MD interaction energy mean (kcal/mol)
+    #   log_k                    — PDBbind experimental -log10(K) (unitless)
+    #   adaptability             — per-atom flexibility (Å)
+    #   multitask                — energy + adaptability (legacy)
+    #   multitask_logk_energy    — log_k headline + MD-energy auxiliary
 
     # Shared
     hidden_dim: int = 128
@@ -117,6 +123,18 @@ class TrainConfig:
     # Early stopping (paired with monitor=val/pearson, mode=max in train.py)
     early_stop_patience: int = 15
     early_stop_min_delta: float = 1e-4
+
+    # ---- Multitask (log_k + energy) -------------------------------------
+    # Loss weights for `target = multitask_logk_energy`. Defaults emphasize
+    # the headline log_k metric while letting the energy head act as a mild
+    # regularizer (0.9 / 0.1 lands within the published range for similar
+    # multitask formulations on PDBbind).
+    multitask_logk_weight: float = 0.9
+    multitask_energy_weight: float = 0.1
+    # Winsorize the AUXILIARY energy target at training-set percentiles
+    # (e.g. (1.0, 99.0) clips the bottom and top 1% before normalization).
+    # None = no clipping (default). Only affects the auxiliary head.
+    winsorize_aux_pct: Optional[Tuple[float, float]] = None
 
     # Output
     log_dir: str = "runs"

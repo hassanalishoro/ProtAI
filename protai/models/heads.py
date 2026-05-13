@@ -84,12 +84,37 @@ class MultiTaskHead(nn.Module):
         }
 
 
+class LogKEnergyMultiTaskHead(nn.Module):
+    """Two graph-level heads: PDBbind log K (headline) + MISATO MD energy (auxiliary).
+
+    Architecturally identical to two `GraphLevelHead`s on the same trunk
+    embeddings. Both share the pooling kind. Loss weighting is applied
+    upstream in the LightningModule, not here.
+    """
+
+    def __init__(self, hidden_dim: int, pool: str = "mean", dropout: float = 0.1):
+        super().__init__()
+        self.logk_head = GraphLevelHead(hidden_dim, pool=pool, dropout=dropout)
+        self.energy_head = GraphLevelHead(hidden_dim, pool=pool, dropout=dropout)
+
+    def forward(self, x: torch.Tensor, batch: torch.Tensor) -> dict:
+        return {
+            "logk": self.logk_head(x, batch),       # (B,)
+            "energy": self.energy_head(x, batch),   # (B,)
+        }
+
+
 def build_head(target: str, hidden_dim: int, pool: str = "mean", dropout: float = 0.1) -> nn.Module:
     """Factory used by models to attach the correct head from config."""
     if target == "binding_affinity":
+        return GraphLevelHead(hidden_dim, pool=pool, dropout=dropout)
+    if target == "log_k":
+        # Same shape as binding_affinity — single graph-level scalar.
         return GraphLevelHead(hidden_dim, pool=pool, dropout=dropout)
     if target == "adaptability":
         return PerAtomHead(hidden_dim, dropout=dropout)
     if target == "multitask":
         return MultiTaskHead(hidden_dim, pool=pool, dropout=dropout)
+    if target == "multitask_logk_energy":
+        return LogKEnergyMultiTaskHead(hidden_dim, pool=pool, dropout=dropout)
     raise ValueError(f"Unknown target {target!r}")

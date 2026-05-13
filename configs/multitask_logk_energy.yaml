@@ -1,0 +1,38 @@
+# Multitask: PDBbind log K (headline) + MISATO MD energy (auxiliary).
+# Loss: 0.9 * MSE(logk_norm) + 0.1 * MSE(energy_norm_winsorized).
+#
+# The auxiliary energy head is Winsorized at the 1st/99th training-set
+# percentiles to keep the long tail of strong binders (4CP5 at -675
+# kcal/mol etc) from dominating the auxiliary loss without hurting the
+# headline log_k metric.
+model:
+  name: "schnet"
+  target: "multitask_logk_energy"
+  hidden_dim: 128
+  num_layers: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "attention"
+
+data:
+  frame_strategy: "random"
+  edge_cutoff: 4.5
+  splits_dir: "data/MD/splits"
+  train_split: "train_random_logk.txt"
+  val_split:   "val_random_logk.txt"
+  test_split:  "test_random_logk.txt"
+
+train:
+  run_name: "multitask_logk_energy"
+  batch_size: 32
+  max_epochs: 50
+  learning_rate: 5.0e-4
+  weight_decay: 1.0e-5
+  loss: "mse"
+  grad_clip: 10.0
+  precision: "bf16-mixed"
+  early_stop_patience: 15
+  seed: 42
+  multitask_logk_weight: 0.9
+  multitask_energy_weight: 0.1
+  winsorize_aux_pct: [1.0, 99.0]

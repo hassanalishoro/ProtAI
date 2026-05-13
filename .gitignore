@@ -11,6 +11,16 @@ runs/
 data/MD/h5_files/MD.hdf5
 data/MD/h5_files/MD_8700.hdf5
 
+# PDBbind affinity table — derived from INDEX_general_PL.YYYYR1.lst.
+# PDBbind's user agreement restricts redistribution of the affinity values,
+# so we regenerate locally via `scripts/build_affinity_csv.py` rather than
+# checking the table into git.
+data/MD/affinity.csv
+
+# log_k filtered splits — derived from train_random.txt etc. + affinity.csv.
+# Regenerable via `scripts/build_logk_splits.py`.
+data/MD/splits/*_logk.txt
+
 # --- Frontend revamp (kept local until model training is complete) ---
 # This way `git clone` on the cloud GPU pod stays small and fast — pod
 # doesn't need any frontend code to train. Remove these lines once training

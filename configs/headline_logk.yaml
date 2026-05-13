@@ -1,0 +1,43 @@
+# Headline configuration on the PDBbind log K target.
+# This is the trajectory-aware variant (random frame sampling) trained
+# on the experimental affinity values that MISATO inherits from PDBbind.
+#
+# Compared to `headline.yaml`:
+#   * target  : log_k       (was binding_affinity = MD energy mean)
+#   * splits  : *_random_logk.txt (filtered to PDBbind overlap, ~12-13k complexes)
+#
+# Prereqs:
+#   1. py -3.11 scripts/build_affinity_csv.py
+#   2. py -3.11 -m protai.data.preshard --annotate-only
+#   3. py -3.11 scripts/build_logk_splits.py
+#
+# Run:
+#   py -3.11 -m protai.training.train --config configs/headline_logk.yaml
+model:
+  name: "schnet"
+  target: "log_k"
+  hidden_dim: 128
+  num_layers: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "attention"
+
+data:
+  frame_strategy: "random"
+  edge_cutoff: 4.5
+  splits_dir: "data/MD/splits"
+  train_split: "train_random_logk.txt"
+  val_split:   "val_random_logk.txt"
+  test_split:  "test_random_logk.txt"
+
+train:
+  run_name: "headline_logk"
+  batch_size: 32
+  max_epochs: 50
+  learning_rate: 5.0e-4
+  weight_decay: 1.0e-5
+  loss: "mse"
+  grad_clip: 10.0
+  precision: "bf16-mixed"
+  early_stop_patience: 15
+  seed: 42

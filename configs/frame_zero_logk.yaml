@@ -1,0 +1,31 @@
+# Static-snapshot baseline on the PDBbind log K target.
+# Pairs with `headline_logk.yaml` for the trajectory-vs-static comparison
+# under the new (correct) affinity target.
+model:
+  name: "schnet"
+  target: "log_k"
+  hidden_dim: 128
+  num_layers: 4
+  schnet_num_filters: 128
+  schnet_num_gaussians: 50
+  graph_pool: "attention"
+
+data:
+  frame_strategy: "frame_zero"
+  edge_cutoff: 4.5
+  splits_dir: "data/MD/splits"
+  train_split: "train_random_logk.txt"
+  val_split:   "val_random_logk.txt"
+  test_split:  "test_random_logk.txt"
+
+train:
+  run_name: "frame_zero_logk"
+  batch_size: 32
+  max_epochs: 50
+  learning_rate: 5.0e-4
+  weight_decay: 1.0e-5
+  loss: "mse"
+  grad_clip: 10.0
+  precision: "bf16-mixed"
+  early_stop_patience: 15
+  seed: 42

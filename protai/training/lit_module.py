@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -87,79 +87,127 @@ def _build_loss(name: str) -> nn.Module:
     raise ValueError(f"Unknown loss {name!r}")
 
 
-def _compute_target_stats(processed_dir: Path, train_split: Path) -> Tuple[float, float, int, int]:
-    """Read training-set y_energy_mean values and return (mean, std, n_used, n_skipped).
+def _compute_target_stats(
+    processed_dir: Path,
+    train_split: Path,
+    target_field: str = "y_energy_mean",
+    winsorize: Optional[Tuple[float, float]] = None,
+) -> Dict[str, Any]:
+    """Compute (mean, std) of `target_field` over the training-set .pt files.
 
-    Cached: writes a small JSON file to processed_dir keyed by a fingerprint
-    of (split file content + processed_dir path). First run takes ~30-60 sec
-    reading 13K+ small files; subsequent runs are instant. Cache invalidates
-    automatically if you re-preshard or change the split list.
+    Cached on disk: the cache key includes:
+      * `processed_dir` absolute path
+      * sha256(split file contents)
+      * the target field name (so log_k vs y_energy_mean don't collide)
+      * the most-recent .pt mtime referenced in the split (so a re-preshard
+        invalidates the cache automatically — fixes review item A1).
+      * winsorize percentiles (so toggling outlier handling re-derives stats)
 
-    Robust to a few missing or corrupt files — those are skipped and counted.
+    Returns a dict:
+        {"mean": float, "std": float, "n_used": int, "n_skipped": int,
+         "winsorize_bounds": (low, high) | None}
     """
     import hashlib
     import json
 
-    # Cache key: hash of (processed_dir absolute path + split file content)
+    pdb_ids = load_split(train_split)
+    proc = Path(processed_dir).resolve()
+
+    # mtime probe: take the latest mtime of up to 64 referenced .pt files.
+    # 64 is enough to detect a re-preshard (which always overwrites in
+    # bulk), without paying full I/O for the cache-key alone.
+    sample_paths = [proc / f"{p}.pt" for p in pdb_ids[:64] if (proc / f"{p}.pt").exists()]
+    if not sample_paths:
+        sample_paths = [p for p in proc.glob("*.pt")][:64]
+    latest_mtime = max((p.stat().st_mtime for p in sample_paths), default=0.0)
+
     split_text = Path(train_split).read_text()
-    fingerprint = hashlib.md5(
-        f"{Path(processed_dir).resolve()}|{split_text}".encode()
-    ).hexdigest()[:12]
-    cache_file = Path(processed_dir) / f".target_stats_{fingerprint}.json"
+    key_blob = (
+        f"{proc}|{target_field}|{winsorize}|"
+        f"{int(latest_mtime)}|{hashlib.sha256(split_text.encode()).hexdigest()}"
+    )
+    fingerprint = hashlib.md5(key_blob.encode()).hexdigest()[:16]
+    cache_file = proc / f".target_stats_{target_field}_{fingerprint}.json"
 
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            return (
-                float(data["mean"]),
-                float(data["std"]),
-                int(data["n_used"]),
-                int(data["n_skipped"]),
-            )
+            wb = data.get("winsorize_bounds")
+            return {
+                "mean": float(data["mean"]),
+                "std": float(data["std"]),
+                "n_used": int(data["n_used"]),
+                "n_skipped": int(data["n_skipped"]),
+                "winsorize_bounds": tuple(wb) if wb is not None else None,
+                "from_cache": True,
+            }
         except Exception:
-            pass  # fall through and recompute
+            pass
 
-    # Cache miss: compute fresh, with progress bar so the user sees activity.
-    print(f"[ProtAI] Computing target normalization stats from training set "
-          f"(cache miss; this is a one-time ~1 min cost)...")
+    print(
+        f"[ProtAI] Computing target stats: field={target_field!r} "
+        f"on {len(pdb_ids):,} train complexes (cache miss)..."
+    )
     try:
         from tqdm import tqdm
-        iterator = tqdm(load_split(train_split), desc="reading targets", unit="cplx")
+        iterator = tqdm(pdb_ids, desc=f"reading {target_field}", unit="cplx")
     except ImportError:
-        iterator = load_split(train_split)
+        iterator = pdb_ids
 
     targets: List[float] = []
     skipped = 0
     for pid in iterator:
-        path = Path(processed_dir) / f"{pid}.pt"
+        path = proc / f"{pid}.pt"
         if not path.exists():
             skipped += 1
             continue
         try:
             rec = torch.load(path, weights_only=False, mmap=True)
-            targets.append(float(rec["y_energy_mean"]))
+            v = rec.get(target_field)
+            if v is None:
+                skipped += 1
+                continue
+            v = float(v) if not isinstance(v, torch.Tensor) else float(v.item())
+            if not np.isfinite(v):
+                skipped += 1
+                continue
+            targets.append(v)
         except Exception:
             skipped += 1
             continue
-    if not targets:
-        raise RuntimeError(f"No training targets readable in {processed_dir}")
 
-    t = torch.tensor(targets, dtype=torch.float32)
-    mean = t.mean().item()
-    std = max(t.std().item(), 1e-3)  # floor so we never divide by ~0
+    if not targets:
+        raise RuntimeError(
+            f"No training targets readable for field {target_field!r} in {processed_dir}"
+        )
+
+    t = np.asarray(targets, dtype=np.float64)
+    bounds: Optional[Tuple[float, float]] = None
+    if winsorize is not None:
+        lo, hi = float(np.percentile(t, winsorize[0])), float(np.percentile(t, winsorize[1]))
+        t = np.clip(t, lo, hi)
+        bounds = (lo, hi)
+
+    mean = float(t.mean())
+    std = float(max(t.std(), 1e-3))
     n_used = len(targets)
 
-    # Save cache for next time. Don't fail training if cache write fails
-    # (read-only volume, permissions, etc) — just skip.
     try:
         cache_file.write_text(json.dumps({
             "mean": mean, "std": std,
             "n_used": n_used, "n_skipped": skipped,
+            "winsorize_bounds": list(bounds) if bounds is not None else None,
+            "target_field": target_field,
         }))
     except Exception:
         pass
 
-    return mean, std, n_used, skipped
+    return {
+        "mean": mean, "std": std,
+        "n_used": n_used, "n_skipped": skipped,
+        "winsorize_bounds": bounds,
+        "from_cache": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -211,13 +259,31 @@ class ProtAILitModule(pl.LightningModule):
         self.loss_fn = _build_loss(cfg.train.loss)
         self.target = m.target
 
-        # -------- Target normalization buffers --------
+        # -------- Target normalization buffers (primary head) --------
         # Initialized to identity (mean=0, std=1) so the model behaves
         # correctly even before stats are computed (e.g., when loading a
         # checkpoint for inference). Real values populated in setup() at
         # the start of fit. Buffers travel with .to(device) automatically.
         self.register_buffer("target_mean", torch.tensor(0.0))
         self.register_buffer("target_std", torch.tensor(1.0))
+
+        # -------- Auxiliary normalization buffers --------
+        # Used only by `multitask_logk_energy`: the primary head normalizes
+        # log_k (mean ~6.5, std ~1.9), the auxiliary head normalizes the
+        # MD energy (mean ~ -28, std ~51). Always allocated so checkpoints
+        # round-trip cleanly across target choices.
+        self.register_buffer("aux_target_mean", torch.tensor(0.0))
+        self.register_buffer("aux_target_std", torch.tensor(1.0))
+
+        # -------- Winsorization bounds (auxiliary head only) --------
+        # When `cfg.train.winsorize_aux_pct` is set (e.g. (1.0, 99.0)), the
+        # auxiliary energy targets are clipped at the training-set
+        # percentiles before normalization. Bounds are computed once at
+        # fit setup; defaults to ±inf (no-op) so checkpoints without
+        # winsorization round-trip correctly.
+        self.register_buffer("aux_winsor_lo", torch.tensor(float("-inf")))
+        self.register_buffer("aux_winsor_hi", torch.tensor(float("+inf")))
+
         # If a checkpoint already contains these buffers, _stats_computed
         # stays True so we don't recompute and overwrite.
         self._stats_computed = False
@@ -235,46 +301,100 @@ class ProtAILitModule(pl.LightningModule):
     def setup(self, stage: str) -> None:
         """Compute target normalization stats from the training split.
 
-        Runs once at the start of `fit`. Skipped for adaptability/multitask
-        targets that don't need scalar normalization. Skipped if stats
-        already loaded from a checkpoint.
+        Runs once at the start of `fit`. Skipped for adaptability (per-atom,
+        already O(1)) and skipped if stats already loaded from a checkpoint.
+
+        Per-target field selection:
+          * binding_affinity         → primary buffers from `y_energy_mean`
+          * log_k                    → primary buffers from `y_logk`
+          * multitask                → primary from `y_energy_mean`,
+                                       adaptability head untouched (raw)
+          * multitask_logk_energy    → primary from `y_logk`,
+                                       auxiliary from `y_energy_mean`
+                                       (with optional Winsorization)
+
+        Winsorization is applied only to the AUXILIARY MD-energy head, where
+        the long-tailed distribution and outliers like 4CP5 (-675 kcal/mol)
+        actually motivate it. Log K targets are well-behaved (range 0-14)
+        and don't need clipping.
         """
         if self._stats_computed:
             return
         if stage != "fit":
             return
         if self.target == "adaptability":
-            # Per-atom adaptability is already O(1-10), no normalization needed.
             self._stats_computed = True
             return
 
         processed_dir = resolve_path(self.cfg.data.processed_dir)
         train_split = resolve_path(self.cfg.data.splits_dir) / self.cfg.data.train_split
 
-        mean, std, n_used, n_skipped = _compute_target_stats(processed_dir, train_split)
-        # `.fill_` mutates the buffer in place, preserving its registered status.
-        self.target_mean.fill_(mean)
-        self.target_std.fill_(std)
-        self._stats_computed = True
+        # Pick the primary field by target.
+        if self.target in ("binding_affinity", "multitask"):
+            primary_field = "y_energy_mean"
+        elif self.target in ("log_k", "multitask_logk_energy"):
+            primary_field = "y_logk"
+        else:
+            primary_field = "y_energy_mean"
 
-        # Print only on rank 0 (avoid duplicate logs in multi-GPU runs).
+        primary = _compute_target_stats(processed_dir, train_split, target_field=primary_field)
+        self.target_mean.fill_(primary["mean"])
+        self.target_std.fill_(primary["std"])
+
         if self.trainer is not None and self.trainer.is_global_zero:
-            print(f"[ProtAI] Target normalization stats:")
-            print(f"  source: {n_used} train samples (skipped {n_skipped})")
-            print(f"  mean:   {mean:+.3f} kcal/mol")
-            print(f"  std:    {std:.3f} kcal/mol")
-            print(f"  → loss computed in normalized z-score space")
-            print(f"  → metrics reported in original kcal/mol")
+            unit = "kcal/mol" if primary_field == "y_energy_mean" else "(-log10 K)"
+            print(f"[ProtAI] Primary normalization ({primary_field}):")
+            print(f"  source : {primary['n_used']:,} train samples (skipped {primary['n_skipped']})")
+            print(f"  mean   : {primary['mean']:+.3f} {unit}")
+            print(f"  std    : {primary['std']:.3f} {unit}")
+            print(f"  cached : {primary['from_cache']}")
+
+        # Auxiliary stats only for the new multitask target.
+        if self.target == "multitask_logk_energy":
+            winsor = getattr(self.cfg.train, "winsorize_aux_pct", None)
+            if winsor is not None:
+                winsor = (float(winsor[0]), float(winsor[1]))
+            aux = _compute_target_stats(
+                processed_dir, train_split,
+                target_field="y_energy_mean",
+                winsorize=winsor,
+            )
+            self.aux_target_mean.fill_(aux["mean"])
+            self.aux_target_std.fill_(aux["std"])
+            if aux["winsorize_bounds"] is not None:
+                self.aux_winsor_lo.fill_(aux["winsorize_bounds"][0])
+                self.aux_winsor_hi.fill_(aux["winsorize_bounds"][1])
+            if self.trainer is not None and self.trainer.is_global_zero:
+                print(f"[ProtAI] Auxiliary normalization (y_energy_mean):")
+                print(f"  source : {aux['n_used']:,} train samples (skipped {aux['n_skipped']})")
+                print(f"  mean   : {aux['mean']:+.3f} kcal/mol")
+                print(f"  std    : {aux['std']:.3f} kcal/mol")
+                if aux["winsorize_bounds"] is not None:
+                    print(f"  winsor : [{aux['winsorize_bounds'][0]:.2f}, {aux['winsorize_bounds'][1]:.2f}] kcal/mol "
+                          f"(percentiles {winsor})")
+
+        self._stats_computed = True
 
     # ----------------------------------------------------------------
     # Normalization helpers
     # ----------------------------------------------------------------
 
     def _normalize(self, y: torch.Tensor) -> torch.Tensor:
+        """Normalize against the PRIMARY head's stats."""
         return (y - self.target_mean) / self.target_std
 
     def _denormalize(self, y: torch.Tensor) -> torch.Tensor:
+        """Denormalize against the PRIMARY head's stats."""
         return y * self.target_std + self.target_mean
+
+    def _normalize_aux(self, y: torch.Tensor) -> torch.Tensor:
+        """Normalize against the AUXILIARY head's stats. Applies Winsorization
+        first when bounds are set (no-op if bounds are ±inf)."""
+        y_clipped = torch.clamp(y, min=self.aux_winsor_lo, max=self.aux_winsor_hi)
+        return (y_clipped - self.aux_target_mean) / self.aux_target_std
+
+    def _denormalize_aux(self, y: torch.Tensor) -> torch.Tensor:
+        return y * self.aux_target_std + self.aux_target_mean
 
     # ----------------------------------------------------------------
     # Forward
@@ -295,12 +415,15 @@ class ProtAILitModule(pl.LightningModule):
             y_norm = self._normalize(data.y)
             return self.loss_fn(pred, y_norm), {}
 
+        if self.target == "log_k":
+            y_norm = self._normalize(data.y)
+            return self.loss_fn(pred, y_norm), {}
+
         if self.target == "adaptability":
             # Per-atom values, no normalization.
             return self.loss_fn(pred, data.y), {}
 
         if self.target == "multitask":
-            # Energy head normalized, adaptability raw.
             y_e_norm = self._normalize(data.y_energy)
             energy_loss = self.loss_fn(pred["energy"], y_e_norm)
             adapt_loss = self.loss_fn(pred["adaptability"], data.y_adapt)
@@ -308,6 +431,26 @@ class ProtAILitModule(pl.LightningModule):
             return total, {
                 "loss/energy": energy_loss.detach(),
                 "loss/adaptability": adapt_loss.detach(),
+            }
+
+        if self.target == "multitask_logk_energy":
+            # Headline: PDBbind log_k (primary head). Auxiliary: MD energy
+            # with optional Winsorization. Loss weights configurable; default
+            # is 0.9 logk + 0.1 energy so the headline metric dominates the
+            # gradient signal but the energy head still gets enough learning
+            # signal to act as a useful regularizer.
+            w_logk = float(getattr(self.cfg.train, "multitask_logk_weight", 0.9))
+            w_energy = float(getattr(self.cfg.train, "multitask_energy_weight", 0.1))
+
+            y_l_norm = self._normalize(data.y_logk)
+            y_e_norm = self._normalize_aux(data.y_energy)
+
+            logk_loss = self.loss_fn(pred["logk"], y_l_norm)
+            energy_loss = self.loss_fn(pred["energy"], y_e_norm)
+            total = w_logk * logk_loss + w_energy * energy_loss
+            return total, {
+                "loss/logk": logk_loss.detach(),
+                "loss/energy_aux": energy_loss.detach(),
             }
 
         raise RuntimeError(f"unhandled target {self.target!r}")
@@ -332,9 +475,14 @@ class ProtAILitModule(pl.LightningModule):
             self.log(f"val/{k}", v, batch_size=data.num_graphs)
 
         # Stash y / yhat for end-of-epoch correlation metrics.
-        # Important: metrics are computed in ORIGINAL UNITS (kcal/mol for
-        # energy, Å for adaptability). Predictions are denormalized accordingly.
+        # IMPORTANT: metrics reported in the target's ORIGINAL units. The
+        # primary head's denormalize lifts back to kcal/mol or -log10(K)
+        # depending on the target. The early-stopping signal (val/pearson)
+        # is computed against this denormalized prediction.
         if self.target == "binding_affinity":
+            y = data.y
+            yhat = self._denormalize(pred)
+        elif self.target == "log_k":
             y = data.y
             yhat = self._denormalize(pred)
         elif self.target == "adaptability":
@@ -343,6 +491,16 @@ class ProtAILitModule(pl.LightningModule):
         elif self.target == "multitask":
             y = data.y_energy
             yhat = self._denormalize(pred["energy"])
+        elif self.target == "multitask_logk_energy":
+            # Headline metric is log_k; the energy head's metric is logged
+            # separately below for diagnostics but doesn't drive early stop.
+            y = data.y_logk
+            yhat = self._denormalize(pred["logk"])
+            # Auxiliary metric on energy (per-batch, eyeballed via TB).
+            with torch.no_grad():
+                e_pred = self._denormalize_aux(pred["energy"])
+                e_err = (e_pred - data.y_energy).abs().mean()
+                self.log("val/aux_energy_mae", e_err, batch_size=data.num_graphs)
         else:  # pragma: no cover
             raise RuntimeError(f"unhandled target {self.target!r}")
 

@@ -18,6 +18,7 @@ Multi-frame strategy options:
 """
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from typing import List, Optional
@@ -30,8 +31,18 @@ from .graph import build_radius_graph
 from .splits import load_split
 
 
-SUPPORTED_TARGETS = {"binding_affinity", "adaptability", "multitask"}
+SUPPORTED_TARGETS = {
+    "binding_affinity",        # MISATO MD interaction energy (mean over frames), kcal/mol
+    "adaptability",            # per-atom flexibility (Å)
+    "multitask",               # legacy: energy + adaptability
+    "log_k",                   # PDBbind experimental -log10(K), unitless
+    "multitask_logk_energy",   # log_k headline + MD-energy auxiliary
+}
 SUPPORTED_FRAME_STRATEGIES = {"frame_zero", "random", "mean", "attention_pool"}
+
+# Targets that REQUIRE a finite y_logk on every sample. Records with NaN
+# y_logk are filtered out at dataset construction time.
+_TARGETS_NEEDING_LOGK = {"log_k", "multitask_logk_energy"}
 
 
 class PreShardedDataset(Dataset):
@@ -94,6 +105,41 @@ class PreShardedDataset(Dataset):
                 f"No .pt files found in {self.processed_dir} matching split. "
                 "Did you run `python -m protai.data.preshard` first?"
             )
+
+        # For log-K-style targets, drop complexes that are missing the
+        # experimental affinity. Cheap header read — pulls only y_logk.
+        if target in _TARGETS_NEEDING_LOGK:
+            kept: list[Path] = []
+            dropped = 0
+            for f in self.files:
+                try:
+                    rec = torch.load(f, weights_only=False, mmap=True)
+                except (RuntimeError, TypeError):
+                    rec = torch.load(f, weights_only=False)
+                y = rec.get("y_logk")
+                if y is None:
+                    dropped += 1
+                    continue
+                v = float(y) if not isinstance(y, torch.Tensor) else float(y.item())
+                if not math.isfinite(v):
+                    dropped += 1
+                    continue
+                kept.append(f)
+            self.files = kept
+            if dropped:
+                print(
+                    f"[PreShardedDataset] target={target!r} requires y_logk; "
+                    f"dropped {dropped:,} complexes without an affinity label "
+                    f"({len(self.files):,} remain)"
+                )
+            if not self.files:
+                raise RuntimeError(
+                    f"target={target!r} requires y_logk but every complex in the split "
+                    f"is missing an affinity label. Did you run\n"
+                    f"  py -3.11 scripts/build_affinity_csv.py\n"
+                    f"  py -3.11 -m protai.data.preshard --annotate-only\n"
+                    f"to inject the PDBbind labels first?"
+                )
 
     def __len__(self) -> int:
         return len(self.files)
@@ -160,6 +206,13 @@ class PreShardedDataset(Dataset):
             y = _take(rec["adaptability"])
         elif self.target == "multitask":
             y = {"energy": _take(rec["y_energy_mean"]).view(1), "adaptability": _take(rec["adaptability"])}
+        elif self.target == "log_k":
+            y = _take(rec["y_logk"]).view(1)
+        elif self.target == "multitask_logk_energy":
+            y = {
+                "logk": _take(rec["y_logk"]).view(1),
+                "energy": _take(rec["y_energy_mean"]).view(1),
+            }
         else:  # pragma: no cover
             raise RuntimeError(f"unhandled target {self.target!r}")
 
@@ -171,11 +224,13 @@ class PreShardedDataset(Dataset):
             z=_take(rec["z"]),
             pdb_id=rec["pdb_id"],
         )
-        # Multitask is a dict; PyG Data only handles tensor / list-of-tensor / scalar.
-        # Use separate keys for clarity.
+        # Multi-output targets get one key per head; single-scalar targets use 'y'.
         if self.target == "multitask":
             kwargs["y_energy"] = y["energy"]
             kwargs["y_adapt"] = y["adaptability"]
+        elif self.target == "multitask_logk_energy":
+            kwargs["y_logk"] = y["logk"]
+            kwargs["y_energy"] = y["energy"]
         else:
             kwargs["y"] = y
 
