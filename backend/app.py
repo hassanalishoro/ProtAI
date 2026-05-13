@@ -55,18 +55,39 @@ app = create_app()
 if __name__ == "__main__":
     frontend = _resolve_frontend_dir()
     is_built = frontend.name == "dist"
-    print("=" * 80)
-    print("ProtAI Backend")
-    print("=" * 80)
     svc = get_service()
-    print(f"  Repo:     {REPO_ROOT}")
-    print(f"  Frontend: {frontend.relative_to(REPO_ROOT)}  ({'production build' if is_built else 'dev source — UI served by Astro on :4321'})")
-    print(f"  Model:    {svc.model_path if svc.model_path else '(none — train first)'}")
-    print(f"  Data:     {svc.data_path}")
-    print(f"  Model loaded: {svc.model_loaded}")
-    print(f"  Data loaded:  {svc.data_loaded}")
-    print("=" * 80)
-    print("Listening on http://localhost:5000")
-    print("API only (in dev). UI: http://localhost:4321")
-    print("=" * 80)
+
+    # Resolve the run dir (parent of the ckpt) for clearer banner output.
+    run_name = svc.model_path.parent.name if svc.model_path else "(none)"
+    ckpt_short: object = (
+        svc.model_path.relative_to(REPO_ROOT) if svc.model_path else "(none — train first)"
+    )
+    try:
+        data_short: object = svc.data_path.relative_to(REPO_ROOT)
+    except ValueError:
+        data_short = svc.data_path
+    fe_mode = "production build" if is_built else "dev source — UI served by Astro on :4321"
+
+    bar = "=" * 80
+    print(bar)
+    print("ProtAI Backend")
+    print(bar)
+    print(f"  Repo       : {REPO_ROOT}")
+    print(f"  Frontend   : {frontend.relative_to(REPO_ROOT)}  ({fe_mode})")
+    print(f"  Run        : {run_name}")
+    print(f"  Checkpoint : {ckpt_short}")
+    print(f"  Dataset    : {data_short}")
+    print(f"  Device     : {svc.device}")
+    print(f"  Model OK   : {svc.model_loaded}")
+    print(f"  Data  OK   : {svc.data_loaded}")
+    print(bar)
+    print("API : http://localhost:5000/api/health")
+    print("UI  : http://localhost:4321   (run `npm run dev` in frontend-new/)")
+    print(bar)
+
+    if not svc.model_loaded:
+        print("[warn] No checkpoint loaded. Predictions will return null.")
+    if not svc.data_loaded:
+        print("[warn] MD.hdf5 not found at the expected path. /api/structures will 500.")
+
     app.run(debug=True, port=5000)
