@@ -438,7 +438,13 @@ class ProtAILitModule(pl.LightningModule):
             # with optional Winsorization. Loss weights configurable; default
             # is 0.9 logk + 0.1 energy so the headline metric dominates the
             # gradient signal but the energy head still gets enough learning
-            # signal to act as a useful regularizer.
+            # signal to act as a useful trunk regularizer.
+            #
+            # Gradient asymmetry caveat: the energy head's parameters only
+            # see 0.1 * energy_loss in their gradient (the shared trunk sees
+            # both contributions). So val/aux_energy_mae will be worse than
+            # a standalone binding_affinity-target run reaches — that's the
+            # expected behavior of an under-weighted auxiliary, not a bug.
             w_logk = float(getattr(self.cfg.train, "multitask_logk_weight", 0.9))
             w_energy = float(getattr(self.cfg.train, "multitask_energy_weight", 0.1))
 

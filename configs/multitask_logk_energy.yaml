@@ -5,6 +5,13 @@
 # percentiles to keep the long tail of strong binders (4CP5 at -675
 # kcal/mol etc) from dominating the auxiliary loss without hurting the
 # headline log_k metric.
+#
+# GRADIENT ASYMMETRY (expected, not a bug). The energy head only receives
+# gradient through 0.1 * energy_loss, so it learns ~10x slower than the
+# log_k head. The shared trunk gets both gradients (so the regularization
+# benefit is real), but val/aux_energy_mae will look poor compared to a
+# standalone energy-only run — don't read that as "multitask is broken".
+# The headline metric is val/pearson on the log_k head.
 model:
   name: "schnet"
   target: "multitask_logk_energy"
