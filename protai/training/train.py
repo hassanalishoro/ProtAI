@@ -30,9 +30,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+import sys
+
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import (
+    Callback,
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
@@ -43,6 +46,42 @@ from torch_geometric.loader import DataLoader
 from ..config import Config, resolve_path
 from ..data import PreShardedDataset
 from .lit_module import ProtAILitModule
+
+
+class EpochSummaryCallback(Callback):
+    """Pipe-friendly one-line-per-epoch metric summary.
+
+    Replaces tqdm's interactive bar when stdout isn't a TTY (i.e., when
+    `tee` or a redirect has captured stdout). Avoids the carriage-return
+    spam that turns one progress line into hundreds in the log file.
+
+    Output format (one line per epoch end):
+        [epoch  3]  train_loss=0.578 val_loss=0.989 val_pearson=0.122
+                    val_spearman=0.136 val_rmse=1.85 val_mae=1.50 val_r2=0.0009
+
+    The single \r-free line plays nicely with grep / less / tail.
+    """
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        m = {k: float(v) for k, v in trainer.callback_metrics.items()
+             if isinstance(v, (int, float, torch.Tensor))}
+        # Pull the keys we know about; quietly skip any that aren't there yet.
+        def g(name):
+            v = m.get(name)
+            return f"{v:+.4g}" if v is not None else "—"
+        line = (
+            f"[epoch {trainer.current_epoch:3d}] "
+            f"train_loss={g('train/loss')} "
+            f"val_loss={g('val/loss')} "
+            f"val_pearson={g('val/pearson')} "
+            f"val_spearman={g('val/spearman')} "
+            f"val_rmse={g('val/rmse')} "
+            f"val_mae={g('val/mae')} "
+            f"val_r2={g('val/r2')}"
+        )
+        print(line, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +311,18 @@ def _make_callbacks(cfg: Config, run_dir: Path) -> List[pl.Callback]:
 
 def _make_trainer(cfg: Config, run_dir: Path) -> pl.Trainer:
     callbacks = _make_callbacks(cfg, run_dir)
+
+    # Pipe-friendly logging: when stdout isn't a TTY (piped through tee, nohup,
+    # tmux capture, etc.), tqdm's carriage-return progress bar becomes one
+    # full line per percentage tick — thousands of redundant log lines per
+    # epoch. Detect that and:
+    #   1. Disable the interactive progress bar entirely.
+    #   2. Add EpochSummaryCallback so we still get one clean line per epoch.
+    is_tty = sys.stdout.isatty()
+    enable_progress_bar = is_tty
+    if not is_tty:
+        callbacks = list(callbacks) + [EpochSummaryCallback()]
+
     logger = TensorBoardLogger(
         save_dir=str(run_dir.parent),
         name=run_dir.name,
@@ -287,6 +338,7 @@ def _make_trainer(cfg: Config, run_dir: Path) -> pl.Trainer:
         logger=logger,
         default_root_dir=str(run_dir),
         log_every_n_steps=10,
+        enable_progress_bar=enable_progress_bar,
         # GNN scatter ops have non-deterministic kernels; the seed handles
         # what determinism we get. Setting deterministic=True would slow us
         # down significantly with no real gain.
