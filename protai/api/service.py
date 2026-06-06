@@ -26,12 +26,10 @@ _SKIP_PREFIXES = ("tiny_", "sanity_", "debug_", "test_", "smoke_")
 # Preferred run names in priority order — first match wins. Lets the demo
 # auto-pick the headline checkpoint without needing PROTAI_MODEL_PATH set.
 _PREFERRED_RUNS = (
-    "random_frame_random",   # headline: trajectory-aware on random split
-    "random_frame",          # legacy alias
-    "headline",              # explicit headline alias if present
-    "schnet_aff_random",     # next-best architecture cell
+    "frame_zero_logk",   
+    "headline_logk",
+    "multitask_logk_energy",
 )
-
 
 def find_latest_best_checkpoint(logs_dir: Path) -> Optional[Path]:
     """Pick the right `best.ckpt` for the demo.

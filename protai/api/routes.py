@@ -3,6 +3,7 @@
 Mounted into `backend/app.py` via `register_routes(app)`. No business logic
 lives here; it's all in `service.py` so we can test it without Flask.
 """
+
 from __future__ import annotations
 
 from flask import Flask, jsonify, request, send_from_directory
