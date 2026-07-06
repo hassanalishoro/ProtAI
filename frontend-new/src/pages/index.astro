@@ -1,0 +1,67 @@
+---
+/**
+ * Single Astro page that renders the prototype's HTML shell.
+ *
+ * Astro's dev server doesn't auto-serve public/index.html at `/`, so we
+ * mirror the shell here. The script tags below load the same JSX bundle
+ * as the production build (which IS served from public/).
+ *
+ * If you change public/index.html, mirror the change here too — or, after
+ * `npm run build`, deploy the dist/ output (which uses public/index.html
+ * directly and skips this file entirely).
+ */
+const fonts =
+  "https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Source+Serif+4:ital,wght@0,400..700;1,400..700&family=Inter:wght@400;500;600;700&family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap";
+const favicon =
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23FF6B4A'/><text x='16' y='22' font-family='JetBrains Mono, monospace' font-size='14' font-weight='700' text-anchor='middle' fill='%230A0E1A'>P</text></svg>";
+---
+
+<!doctype html>
+<html lang="en" data-theme="lab">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0A0E1A" />
+  <title>ProtAI — Trajectory-aware protein–ligand binding affinity prediction</title>
+  <meta name="description" content="ProtAI predicts binding affinity from molecular-dynamics trajectories, going beyond static-structure approaches. Built on MISATO with graph neural networks." />
+
+  <link rel="icon" type="image/svg+xml" href={favicon} />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href={fonts} rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+
+  <!-- Theme bootstrap — applied before paint -->
+  <script is:inline>
+    (function () {
+      try {
+        var root = document.documentElement;
+        var palette = localStorage.getItem("protai-palette") || "lab";
+        var voice   = localStorage.getItem("protai-voice")   || "serif";
+        var density = localStorage.getItem("protai-density") || "editorial";
+        root.setAttribute("data-theme",   palette);
+        root.setAttribute("data-voice",   voice);
+        root.setAttribute("data-density", density);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- React + Babel (in-browser; acceptable for a research demo) -->
+  <script is:inline src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+  <script is:inline src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+  <script is:inline src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+  <!-- App scripts — order matters: api → primitives → pages → tweaks → boot -->
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/api.js"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/components.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/page-landing.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/page-demo.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/page-content.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/tweaks-panel.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/tweaks.jsx"></script>
+  <script is:inline type="text/babel" data-presets="env,react" src="/scripts/app.jsx"></script>
+</body>
+</html>
