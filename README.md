@@ -2,9 +2,7 @@
 
 **Trajectory-aware protein–ligand binding affinity prediction with graph neural networks on the MISATO dataset.**
 
-Most published binding-affinity models train on a single static crystal snapshot per complex. ProtAI trains on the whole MD trajectory — 100 frames per complex × 16,972 complexes — so the model sees how the binding pocket actually moves during binding.
-
-> **Status:** code complete, production preshard verified at 16,972 / 16,972 complexes. Training runs in progress.
+Most published binding-affinity models train on a single static crystal snapshot per complex. ProtAI trains on the whole MD trajectory, 100 frames per complex × 16,972 complexes, so the model sees how the binding pocket actually moves during binding.
 
 | | |
 |---|---|
