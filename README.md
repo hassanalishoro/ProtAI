@@ -8,7 +8,7 @@ Most published binding-affinity models train on a single static crystal snapshot
 
 | | |
 |---|---|
-| **Team** | Ibaad Ahmed Chaudhry (22I-0585) · Abdullah Kaif Sheikh (22I-2142) · Hassan Ali Shoro (22I-0561) |
+| **Team** | Hassan Ali Shoro (22I-0561) · Ibaad Ahmed Chaudhry (22I-0585) · Abdullah Kaif Sheikh (22I-2142) |
 | **Supervisor** | Mr. Shoaib Saleem Khattak |
 | **Institution** | Department of Computer Science, FAST NUCES Islamabad |
 | **Session** | 2022 — 2026 |
